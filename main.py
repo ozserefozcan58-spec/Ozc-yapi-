@@ -1,3 +1,4 @@
+
 import os, base64, json, secrets, math, logging, unicodedata
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,7 @@ app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=['POST',
 INSTRUCTIONS = '''You read Turkish hand-drawn aluminium joinery sheets. Return JSON only.
 Read ALL positions in visual order, left to right and top to bottom. Ignore material stock totals as positions.
 Extract THREE separate things for EVERY position: (1) written outside width/height in cm, (2) frame/mullion layout, (3) opening symbols and system labels. Do not stop after measuring rectangles.
+An unmarked rectangular panel is FIXED glazing. The generic word window/pencere never means operable sash. Short diagonal measurement ticks across outer edges or across a fixed mullion are dimension marks, NEVER sash symbols. Only clear chevrons/X INSIDE the glazing, made of long lines meeting within the pane, are opening evidence. A vertical divider alone does not indicate a sash. Return opening_symbol=single_chevron/double_chevron/binili_symbol for every operable opening. Use no opening pieces for panels without interior opening marks. For handwritten corrected heights, use the uncrossed latest value; different heights on different positions are not contradictions.
 User drawing convention: one chevron/triangle identifies one operable leaf (door or sash). Opposing chevrons or an X inside an operable opening denote BINILI double leaves: doubleSash for binili kanat, double for binili kapi. This is not a fixed-glass mullion. Show two leaves with no fixed middle mullion. A rectangle above leaves is fixed transom glass; do not turn the entire opening into a full-height sash. A neighboring rectangle is fixed glazing. Crossed-out text/dimensions are corrections, not opening symbols. 'Sonra imalat' is a production note, not a reason to discard an opening.
 Respect labels local to each position: Aldoks written above a WC door applies to that door only. C60/RW60 and Aldoks must never be merged into one system for all positions. Labels may apply to neighboring similar doors. If Aldoks series (tam/yarim) is absent, report system=aldoks and system_series=null, plus a Turkish warning. Do not guess profile series.
 Top-level keys: customer, project, system (c60/aldoks/null), glass, positions, warnings (Turkish strings).
@@ -34,12 +36,23 @@ def canonical_piece(piece):
         'hh':'hh','halfhorizontal':'hh','halfhorizontalmullion':'hh','yarimyataykayit':'hh',
         'door':'door','singledoor':'door','tek kapi':'door','tekkapi':'door','kapi':'door',
         'double':'double','doubledoor':'double','doubleleafdoor':'double','binilikapi':'double','ciftkapi':'double',
-        'sash':'sash','window':'sash','singlewindow':'sash','singleleaf':'sash','casement':'sash','kanat':'sash','tekkanat':'sash',
+        'sash':'sash','singleleaf':'sash','casement':'sash','kanat':'sash','tekkanat':'sash',
         'doublesash':'doubleSash','doublewindow':'doubleSash','doubleleafwindow':'doubleSash','doubleleaf':'doubleSash','binili':'doubleSash','binilikanat':'doubleSash','ciftkanat':'doubleSash',
     }
     static={'fixed','fixedglass','fixedpanel','fixedglazing','fixedwindow','glass','glazing','sabit','sabitcam','sabitpanel',
             'frame','outerframe','kasa','sill','bottomsill','etek','bottomprofile','bead','glazingbead','cita'}
     if token in static:return None
+    if token in {'window','singlewindow','panel','pencere'}:
+        # A whole window/panel is not evidence of an operable leaf.
+        subtype=piece.get('opening_type') or piece.get('sash_type')
+        if subtype and str(subtype).lower() not in {'window','singlewindow','panel','pencere'}:
+            return canonical_piece({**piece,'kind':subtype})
+        symbol=piece.get('opening_symbol')
+        if symbol in {'double_chevron','binili_symbol'}:
+            return {**piece,'kind':'doubleSash'}
+        if symbol=='single_chevron':
+            return {**piece,'kind':'sash'}
+        return None
     kind=aliases.get(token)
     if kind is None:
         # A generic record needs its explicit orientation; never assume an opening is fixed.
@@ -71,10 +84,13 @@ def validate_result(result):
         parts = pos.get('pieces') or []
         if not isinstance(parts, list): raise ValueError('Parça listesi geçersiz')
         normalized=[]
+        generic_count=0
         for raw_piece in parts:
             try:p=canonical_piece(raw_piece)
             except ValueError as exc:raise ValueError('P'+str(i)+' '+str(exc))
-            if p is None:continue
+            if p is None:
+                if isinstance(raw_piece,dict) and str(raw_piece.get('kind') or raw_piece.get('type') or '').lower() in {'window','singlewindow','panel','pencere'}:generic_count+=1
+                continue
             normalized.append(p)
             for key in ('x','y','doorWidth','doorHeight'):
                 if p.get(key) is not None:
@@ -87,6 +103,11 @@ def validate_result(result):
                     except (KeyError,TypeError,ValueError):raise ValueError('P'+str(i)+' kanat sınırları eksik')
                     if not all(math.isfinite(v) for v in p[key].values()):raise ValueError('Kanat sınırları sonlu değil')
         pos['pieces'] = normalized[:40]
+        if generic_count:
+            warnings=pos.get('warnings')
+            if not isinstance(warnings,list):warnings=[]
+            warnings.append('Genel pencere türü açılır kanat sayılmadı; açılım işaretlerini önizlemede kontrol edin.')
+            pos['warnings']=warnings
     return result
 
 def analysis_error(exc):
@@ -109,7 +130,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v124','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v125','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
