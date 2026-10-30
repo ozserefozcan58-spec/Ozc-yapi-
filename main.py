@@ -1,4 +1,3 @@
-
 import os, base64, json, secrets, math, logging, unicodedata
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,10 +14,11 @@ Read ALL positions in visual order, left to right and top to bottom. Ignore mate
 Extract THREE separate things for EVERY position: (1) written outside width/height in cm, (2) frame/mullion layout, (3) opening symbols and system labels. Do not stop after measuring rectangles.
 An unmarked rectangular panel is FIXED glazing. The generic word window/pencere never means operable sash. Short diagonal measurement ticks across outer edges or across a fixed mullion are dimension marks, NEVER sash symbols. Only clear chevrons/X INSIDE the glazing, made of long lines meeting within the pane, are opening evidence. A vertical divider alone does not indicate a sash. Return opening_symbol=single_chevron/double_chevron/binili_symbol for every operable opening. Use no opening pieces for panels without interior opening marks. For handwritten corrected heights, use the uncrossed latest value; different heights on different positions are not contradictions.
 User drawing convention: one chevron/triangle identifies one operable leaf (door or sash). Opposing chevrons or an X inside an operable opening denote BINILI double leaves: doubleSash for binili kanat, double for binili kapi. This is not a fixed-glass mullion. Show two leaves with no fixed middle mullion. A rectangle above leaves is fixed transom glass; do not turn the entire opening into a full-height sash. A neighboring rectangle is fixed glazing. Crossed-out text/dimensions are corrections, not opening symbols. 'Sonra imalat' is a production note, not a reason to discard an opening.
+Bottom profile is INDEPENDENT of system. User drawing convention: a narrow band at the very BOTTOM of a fixed panel bounded by two parallel horizontal lines denotes ETEK (12 cm), even for ALDOKS. Set bottom_profile=etek for that position. Do not convert the band to a horizontal mullion, and do not default all Aldoks bottoms to kasa. A line above a door/leaf is a transom record, not an etek. A band inside a leaf is its leaf-bottom etek, not a fixed outer threshold. Use bottom_profile=kasa only for clearly indicated frame bottom; otherwise null.
 Respect labels local to each position: Aldoks written above a WC door applies to that door only. C60/RW60 and Aldoks must never be merged into one system for all positions. Labels may apply to neighboring similar doors. If Aldoks series (tam/yarim) is absent, report system=aldoks and system_series=null, plus a Turkish warning. Do not guess profile series.
 Top-level keys: customer, project, system (c60/aldoks/null), glass, positions, warnings (Turkish strings).
 Do not emit fixed glass, outer frames, sills or glazing beads in pieces; they are implicit. Only mullions and operable openings belong in pieces.
-Each position: width, height, system (c60/aldoks/null), system_series (tam/yarim/null), records, pieces, warnings, note.
+Each position: bottom_profile (etek/kasa/null), width, height, system (c60/aldoks/null), system_series (tam/yarim/null), records, pieces, warnings, note.
 width/height must come from clearly written outside dimensions, never proportions. Use null for unreadable dimensions and warn; retain original visual order.
 records counts fixed vertical mullions only, NOT sash stiles, double-leaf meeting stiles, frames or dimension ticks.
 pieces contains all visible fixed mullions AND all openings. Allowed kind: v,h,hv,hh,door,double,sash,doubleSash. Normalized x/y are visual layout coordinates (0..1) only. Opening pieces require bounds={left,right,top,bottom} describing the visible opening within the outer frame (0..1), align=left/center/right, side=left/right, mainSide=right unless explicitly indicated. doorWidth/doorHeight must be explicit written internal opening dimensions, otherwise null. Flag schematic=true when bounds are estimated from sketch proportions. These proportions are for schematic display only, never manufacturing measurements. Never invent 90/180/220 dimensions. v/h pieces use x/y; hh also includes doorSpan=[left,right]. Do not duplicate an opening edge if the shared fixed mullion is already represented. If an opening symbol exists, pieces MUST NOT be empty. If type is uncertain, preserve your best structural classification and explain in Turkish warnings, rather than silently returning fixed glazing.
@@ -35,9 +35,9 @@ def canonical_piece(piece):
         'hv':'hv','halfvertical':'hv','halfverticalmullion':'hv','yarimdikeykayit':'hv',
         'hh':'hh','halfhorizontal':'hh','halfhorizontalmullion':'hh','yarimyataykayit':'hh',
         'door':'door','singledoor':'door','tek kapi':'door','tekkapi':'door','kapi':'door',
-        'double':'double','doubledoor':'double','doubleleafdoor':'double','binilikapi':'double','ciftkapi':'double',
+        'double':'double','binilidoor':'double','binilidoubledoor':'double','doubledoor':'double','doubleleafdoor':'double','binilikapi':'double','ciftkapi':'double',
         'sash':'sash','singleleaf':'sash','casement':'sash','kanat':'sash','tekkanat':'sash',
-        'doublesash':'doubleSash','doublewindow':'doubleSash','doubleleafwindow':'doubleSash','doubleleaf':'doubleSash','binili':'doubleSash','binilikanat':'doubleSash','ciftkanat':'doubleSash',
+        'binilisash':'doubleSash','biniliwindow':'doubleSash','binilidoublesash':'doubleSash','biniliciftkanat':'doubleSash','doublecasement':'doubleSash','doublesash':'doubleSash','doublewindow':'doubleSash','doubleleafwindow':'doubleSash','doubleleaf':'doubleSash','binili':'doubleSash','binilikanat':'doubleSash','ciftkanat':'doubleSash',
     }
     static={'fixed','fixedglass','fixedpanel','fixedglazing','fixedwindow','glass','glazing','sabit','sabitcam','sabitpanel',
             'frame','outerframe','kasa','sill','bottomsill','etek','bottomprofile','bead','glazingbead','cita'}
@@ -83,12 +83,18 @@ def validate_result(result):
         if pos.get('system_series') not in ('tam','yarim',None): pos['system_series'] = None
         parts = pos.get('pieces') or []
         if not isinstance(parts, list): raise ValueError('Parça listesi geçersiz')
+        bottom=pos.get('bottom_profile',pos.get('bottom'))
+        bottom_aliases={'etek':'etek','sill':'etek','bottom_sill':'etek','12 cm etek':'etek','kasa':'kasa','frame':'kasa'}
+        pos['bottom_profile']=bottom_aliases.get(str(bottom).strip().lower()) if bottom is not None else None
         normalized=[]
         generic_count=0
         for raw_piece in parts:
             try:p=canonical_piece(raw_piece)
             except ValueError as exc:raise ValueError('P'+str(i)+' '+str(exc))
             if p is None:
+                raw_kind=str(raw_piece.get('kind') or raw_piece.get('type') or '').lower() if isinstance(raw_piece,dict) else ''
+                if raw_kind in {'etek','sill','bottom_sill','bottomsill'} and raw_piece.get('scope') not in {'leaf','sash','door'}:
+                    pos['bottom_profile']='etek'
                 if isinstance(raw_piece,dict) and str(raw_piece.get('kind') or raw_piece.get('type') or '').lower() in {'window','singlewindow','panel','pencere'}:generic_count+=1
                 continue
             normalized.append(p)
@@ -130,7 +136,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v125','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v128','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
