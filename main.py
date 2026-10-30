@@ -94,3 +94,46 @@ def analysis_error(exc):
     name=type(exc).__name__;status=getattr(exc,'status_code',None)
     code=getattr(exc,'code',None)
     known_codes={'insufficient_quota','rate_limit_exceeded','invalid_api_key','model_not_found','context_length_exceeded'}
+    if code not in known_codes:code='unspecified'
+    logger.error('OZC analysis failure type=%s upstream_status=%s code=%s',name,status,code)
+    if isinstance(exc,json.JSONDecodeError):return 'AI_JSON: Model geçerli JSON döndürmedi. Tekrar deneyin.'
+    if isinstance(exc,ValueError):return 'AI_FORMAT: '+str(exc)
+    if status==401:return 'OPENAI_AUTH: Render OPENAI_API_KEY değeri OpenAI tarafından reddedildi.'
+    if status==429:
+        return 'OPENAI_QUOTA: API bakiyesi/kotası yetersiz.' if code=='insufficient_quota' else 'OPENAI_RATE: API kullanım sınırına ulaşıldı. Biraz sonra deneyin.'
+    if status==404:return 'OPENAI_MODEL: Render OPENAI_MODEL değeri için model bulunamadı veya erişim yok.'
+    if status==400:return 'OPENAI_REQUEST: Model veya görsel isteği reddedildi; OPENAI_MODEL ayarını kontrol edin.'
+    if name=='APITimeoutError':return 'OPENAI_TIMEOUT: Görsel analizi zaman aşımına uğradı.'
+    if name=='APIConnectionError':return 'OPENAI_CONNECTION: Sunucu OpenAI bağlantısını kuramadı.'
+    return 'AI_INTERNAL: Analiz tamamlanamadı. Render Logs içindeki OZC analysis failure satırını paylaşın.'
+
+@app.get('/health')
+def health():
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v124','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+
+@app.post('/analyze')
+async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
+    access_key = os.getenv('OZC_ACCESS_KEY')
+    if not access_key: raise HTTPException(503, 'Access control not configured')
+    if not x_ozc_access_key or not secrets.compare_digest(x_ozc_access_key, access_key):
+        raise HTTPException(401, 'Unauthorized')
+    key = os.getenv('OPENAI_API_KEY')
+    if not key: raise HTTPException(503, 'OPENAI_API_KEY not configured')
+    if image.content_type not in ('image/jpeg','image/png','image/webp'):
+        raise HTTPException(415, 'JPEG, PNG or WEBP required')
+    content = await image.read(10*1024*1024+1)
+    if len(content)>10*1024*1024: raise HTTPException(413, 'Maximum image size 10MB')
+    url = 'data:'+image.content_type+';base64,'+base64.b64encode(content).decode()
+    try:
+        async with AsyncOpenAI(api_key=key, timeout=75, max_retries=0) as client:
+            response = await client.chat.completions.create(
+                model=os.getenv('OPENAI_MODEL','gpt-4.1-mini'),
+                response_format={'type':'json_object'}, temperature=0,max_tokens=6000,
+                messages=[{'role':'system','content':INSTRUCTIONS},
+                          {'role':'user','content':[{'type':'text','text':'Read every position, including opening symbols, binili kanat and local Aldoks labels. Return the complete JSON schema.'},
+                                                    {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}])
+        if response.choices[0].finish_reason != 'stop': raise ValueError('Yanıt tamamlanmadı; görseli daha az poz içerecek şekilde bölüp deneyin')
+        result = validate_result(json.loads(response.choices[0].message.content))
+        return {'result':result,'analyzer_version':VERSION}
+    except Exception as exc:
+        raise HTTPException(502, analysis_error(exc))
