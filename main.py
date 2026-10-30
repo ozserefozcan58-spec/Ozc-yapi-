@@ -15,6 +15,7 @@ Extract THREE separate things for EVERY position: (1) written outside width/heig
 An unmarked rectangular panel is FIXED glazing. The generic word window/pencere never means operable sash. Short diagonal measurement ticks across outer edges or across a fixed mullion are dimension marks, NEVER sash symbols. Only clear chevrons/X INSIDE the glazing, made of long lines meeting within the pane, are opening evidence. A vertical divider alone does not indicate a sash. Return opening_symbol=single_chevron/double_chevron/binili_symbol for every operable opening. Use no opening pieces for panels without interior opening marks. For handwritten corrected heights, use the uncrossed latest value; different heights on different positions are not contradictions.
 User drawing convention: one chevron/triangle identifies one operable leaf (door or sash). Opposing chevrons or an X inside an operable opening denote BINILI double leaves: doubleSash for binili kanat, double for binili kapi. This is not a fixed-glass mullion. Show two leaves with no fixed middle mullion. A rectangle above leaves is fixed transom glass; do not turn the entire opening into a full-height sash. A neighboring rectangle is fixed glazing. Crossed-out text/dimensions are corrections, not opening symbols. 'Sonra imalat' is a production note, not a reason to discard an opening.
 Bottom profile is INDEPENDENT of system. User drawing convention: a narrow band at the very BOTTOM of a fixed panel bounded by two parallel horizontal lines denotes ETEK (12 cm), even for ALDOKS. Set bottom_profile=etek for that position. Do not convert the band to a horizontal mullion, and do not default all Aldoks bottoms to kasa. A line above a door/leaf is a transom record, not an etek. A band inside a leaf is its leaf-bottom etek, not a fixed outer threshold. Use bottom_profile=kasa only for clearly indicated frame bottom; otherwise null.
+Read labels BELOW the drawings and in notebook captions, not just above them. 'ALDOKS YARIM SERİ', 'yarım', 'yarim seri' and 'dar seri' all require system=aldoks, system_series=yarim; 'tam seri' and 'orta seri' require system_series=tam. Do not lose this explicit word when extracting dimensions. A caption beneath one drawing applies locally; a clearly common caption beneath a group applies to that group, never to unrelated C60 positions.
 Respect labels local to each position: Aldoks written above a WC door applies to that door only. C60/RW60 and Aldoks must never be merged into one system for all positions. Labels may apply to neighboring similar doors. If Aldoks series (tam/yarim) is absent, report system=aldoks and system_series=null, plus a Turkish warning. Do not guess profile series.
 Top-level keys: customer, project, system (c60/aldoks/null), glass, positions, warnings (Turkish strings).
 Do not emit fixed glass, outer frames, sills or glazing beads in pieces; they are implicit. Only mullions and operable openings belong in pieces.
@@ -63,6 +64,12 @@ def canonical_piece(piece):
     out=dict(piece);out['kind']=kind
     return out
 
+def canonical_series(value):
+    token=''.join(ch for ch in unicodedata.normalize('NFKD',str(value or '').lower().replace('ı','i')) if ch.isalnum() and not unicodedata.combining(ch))
+    if token in {'yarim','yarimseri','dar','darseri','aldoksyarim','aldoksyarimseri','aldoksdarseri'}:return 'yarim'
+    if token in {'tam','tamseri','orta','ortaseri','aldokstam','aldokstamseri','aldoksortaseri'}:return 'tam'
+    return None
+
 def validate_result(result):
     if not isinstance(result, dict) or not isinstance(result.get('positions'), list):
         raise ValueError('positions listesi eksik')
@@ -79,8 +86,12 @@ def validate_result(result):
             if not math.isfinite(number) or not 30 <= number <= 3000:
                 raise ValueError('P'+str(i)+' dış ölçüsü aralık dışında')
             pos[key]=number
-        if pos.get('system') not in ('c60','aldoks',None): pos['system'] = None
-        if pos.get('system_series') not in ('tam','yarim',None): pos['system_series'] = None
+        local_system=str(pos.get('system') or '').lower()
+        series=canonical_series(pos.get('system_series') or pos.get('series')) or canonical_series(pos.get('system'))
+        if 'aldoks' in local_system or series:pos['system']='aldoks'
+        elif pos.get('system') not in ('c60',None):pos['system']=None
+        if not series and pos.get('system')=='aldoks':series=canonical_series(result.get('system_series'))
+        pos['system_series']=series
         parts = pos.get('pieces') or []
         if not isinstance(parts, list): raise ValueError('Parça listesi geçersiz')
         bottom=pos.get('bottom_profile',pos.get('bottom'))
@@ -136,7 +147,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v128','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v129','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
