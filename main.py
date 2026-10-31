@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v148-missing-width'
+VERSION = 'ozc-v149-bay-consistency'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -178,6 +178,27 @@ def validate_result(result):
             actual=sum(p['kind']=='v' for p in normalized)
             if audit['bay_count']!=actual+1:
                 raise ValueError('Bölme sayısı ile dikey kayıt sayısı uyuşmuyor: P'+str(i)+' bölme='+str(audit['bay_count'])+', dikey kayıt='+str(actual)+', beklenen bölme='+str(actual+1))
+        # A numerically consistent audit can still erase a fixed bay. Check
+        # every opening against the actual divider intervals and bay labels.
+        if isinstance(audit,dict) and isinstance(audit.get('bays'),list):
+            edges=[0.0]+sorted(p['x'] for p in normalized if p['kind']=='v' and p.get('x') is not None)+[1.0]
+            bays=audit['bays']
+            if len(bays)!=len(edges)-1:
+                raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' bölme listesi ile kayıt aralıkları farklı')
+            for opening in normalized:
+                if opening['kind'] not in {'door','double','sash','doubleSash'}:continue
+                box=opening.get('bounds') or opening.get('opening')
+                if not box:continue
+                center=(box['left']+box['right'])/2
+                bay=next((j for j in range(len(edges)-1) if edges[j]<=center<edges[j+1]),None)
+                if bay is None:raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' açılım çerçeve dışında')
+                if bays[bay].get('type')=='fixed':
+                    raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' kapı sabit cam bölmesine konmuş; eksik dikey kayıt veya yanlış kapı sınırı')
+                if box['left']<edges[bay]-.02 or box['right']>edges[bay+1]+.02:
+                    raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' açılım sabit kayıt üzerinden komşu bölmeye taşıyor')
+                expected=bays[bay].get('type')
+                if expected in {'double','doubleSash'} and opening['kind'] in {'door','sash'}:
+                    raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' binili bölme tek kanat olarak aktarılmış')
         pos['pieces'] = normalized[:40]
         if generic_count:
             warnings=pos.get('warnings')
@@ -206,7 +227,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v148','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v149','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -243,7 +264,7 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 elif any(p.get('bottom_profile') is None for p in result['positions']):
                     review_reason='At least one bottom_profile is null. Inspect each fixed pane bottom carefully for the paired horizontal ETEK band, including a band only beside a door. Recheck all local transoms: a record above a side door is hh with doorSpan, not a full-width h.'
             except ValueError as exc:
-                if not any(reason in str(exc) for reason in ('iç açılım işareti doğrulanamadı','Bölme sayısı ile dikey kayıt sayısı uyuşmuyor','Kayıt konumu dış ölçünün dışında')):raise
+                if not any(reason in str(exc) for reason in ('iç açılım işareti doğrulanamadı','Bölme sayısı ile dikey kayıt sayısı uyuşmuyor','Kayıt konumu dış ölçünün dışında','Bölme yerleşimi tutarsız')):raise
                 review_reason=str(exc)+'. Recheck written record-distance leaders and their units against the ORIGINAL photo. position_from_left_cm must be an actual left-outside-edge to divider CENTER distance in CENTIMETERS, strictly within outside width. Do not confuse outside width, height, panel width, stock lengths, or a neighboring position dimension with this offset. Convert mm to cm only when the written unit confirms millimeters. If unreadable, return null and warn in Turkish; never clamp or invent an offset. Recount STRUCTURAL bays along the TOP edge, not glass panes or leaves. A double door counts as ONE bay and its meeting stile is NOT v. Keep every fixed bay between separate doors. Correct the inconsistent pieces or audit from the photo; never add a divider just to satisfy arithmetic.'
             if review_reason is None and any(sum(q['kind'] in {'door','double','sash','doubleSash'} for q in p['pieces'])>=2 for p in result['positions']):
                 review_reason='Multiple operable openings: independently count the top-edge vertical dividers and every fixed bay BETWEEN openings. Verify layout_audit, door versus window using ground openings, all written record distances, and separate hh transoms without crossing intervening fixed panes.'
@@ -253,7 +274,7 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 # Start the review from the original photo, without the failed model
                 # response: repeating it can anchor the recount to missing dividers.
                 messages=messages[:2]
-                review_reason+=' First trace ALL full-height INTERNAL vertical strokes from the top frame down to the floor/sill. Each stroke between neighboring structural bays must appear exactly once as kind=v in pieces, including the side jambs separating a door bay from fixed glazing. Only the central moving-leaf meeting stile is excluded. Build layout_audit from that same traced list: vertical_record_count equals the v count and bay_count equals that count plus one. Do not count transom glass as a separate structural bay. Next trace local transoms, then classify openings. Preserve every written dimension and the full list of positions.'
+                review_reason+=' Never repair a contradiction by reducing the bay_count or deleting a fixed bay. An alternating fixed/single door/fixed/double door sequence has four structural bays, three v pieces, one door piece, one double piece and two local hh transoms. A written divider distance locates the divider, not an opening. Classify the rightmost opening by its OWN chevrons. First trace ALL full-height INTERNAL vertical strokes from the top frame down to the floor/sill. Each stroke between neighboring structural bays must appear exactly once as kind=v in pieces, including the side jambs separating a door bay from fixed glazing. Only the central moving-leaf meeting stile is excluded. Build layout_audit from that same traced list: vertical_record_count equals the v count and bay_count equals that count plus one. Do not count transom glass as a separate structural bay. Next trace local transoms, then classify openings. Preserve every written dimension and the full list of positions.'
                 messages.append({'role':'user','content':[{'type':'text','text':
                     'Recheck the ORIGINAL PHOTO independently. '+review_reason+
                     ' Mentally rotate if needed. Return FULL corrected JSON with all dimensions, mullions, transoms, series and bottom_profile. Include opening_symbol on each real opening. Preserve real openings. Return bottom_evidence for each position: paired_lines requires etek, single_line requires kasa, unclear requires null. Count only hand-drawn strokes at that position fixed bottom, ignoring printed grid lines. A band only beside a door still counts. Do not copy evidence between positions. Do not invent evidence.'}]})
