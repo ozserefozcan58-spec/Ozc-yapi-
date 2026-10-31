@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v147-independent-review'
+VERSION = 'ozc-v148-missing-width'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -158,9 +158,10 @@ def validate_result(result):
             if p['kind']=='v' and p.get('position_from_left_cm') is not None:
                 try: offset=float(str(p['position_from_left_cm']).replace(',','.'))
                 except (ValueError,TypeError):raise ValueError('Kayıt konumu sayısal değil')
-                if not math.isfinite(offset) or not pos.get('width') or not 0<offset<pos['width']:
+                if not math.isfinite(offset) or offset<=0 or (pos.get('width') is not None and offset>=pos['width']):
                     raise ValueError('Kayıt konumu dış ölçünün dışında: P'+str(i)+', soldan konum='+str(offset)+' cm, dış en='+str(pos.get('width'))+' cm')
-                p['x']=offset/pos['width']
+                p['position_from_left_cm']=offset
+                if pos.get('width') is not None:p['x']=offset/pos['width']
             normalized.append(p)
             for key in ('x','y','doorWidth','doorHeight'):
                 if p.get(key) is not None:
@@ -205,7 +206,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v147','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v148','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -237,7 +238,9 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
             review_reason=None
             try:
                 result = validate_result(raw)
-                if any(p.get('bottom_profile') is None for p in result['positions']):
+                if any(p.get('width') is None or p.get('height') is None for p in result['positions']):
+                    review_reason='An outside width or height is missing. Re-read the written dimension ABOVE and BESIDE each position. Keep position order and preserve every readable position_from_left_cm; a missing outside width does NOT invalidate an independently written record offset. Do not substitute the record dimension for the outside width. Do not infer dimensions from proportions.'
+                elif any(p.get('bottom_profile') is None for p in result['positions']):
                     review_reason='At least one bottom_profile is null. Inspect each fixed pane bottom carefully for the paired horizontal ETEK band, including a band only beside a door. Recheck all local transoms: a record above a side door is hh with doorSpan, not a full-width h.'
             except ValueError as exc:
                 if not any(reason in str(exc) for reason in ('iç açılım işareti doğrulanamadı','Bölme sayısı ile dikey kayıt sayısı uyuşmuyor','Kayıt konumu dış ölçünün dışında')):raise
