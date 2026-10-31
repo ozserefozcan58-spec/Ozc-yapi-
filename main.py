@@ -13,6 +13,8 @@ INSTRUCTIONS = '''You read Turkish hand-drawn aluminium joinery sheets. Return J
 Read ALL positions in visual order, left to right and top to bottom. Ignore material stock totals as positions.
 Extract THREE separate things for EVERY position: (1) written outside width/height in cm, (2) frame/mullion layout, (3) opening symbols and system labels. Do not stop after measuring rectangles.
 An unmarked rectangular panel is FIXED glazing. The generic word window/pencere never means operable sash. Short diagonal measurement ticks across outer edges or across a fixed mullion are dimension marks, NEVER sash symbols. Only clear chevrons/X INSIDE the glazing, made of long lines meeting within the pane, are opening evidence. A vertical divider alone does not indicate a sash. Return opening_symbol=single_chevron/double_chevron/binili_symbol for every operable opening. Use no opening pieces for panels without interior opening marks. For handwritten corrected heights, use the uncrossed latest value; different heights on different positions are not contradictions.
+First trace the structural grid before looking for openings. Outside arrows, leaders, curved arrows pointing at a record, dimension numerals and notebook grid lines are NEVER opening evidence. A horizontal line spanning the frame is a fixed horizontal mullion even when it crosses a vertical mullion. Keep BOTH records at their intersection. Never replace this grid with leaves based on the number, width or height of its rectangular panels.
+For a written record height measured from the bottom, set h.y=(outside_height-written_height_from_bottom)/outside_height, not written_height_from_bottom/outside_height. Example: outside 300 x 270, one central vertical line, one full horizontal line labeled 200 from below, caption 'dar seri aldoks', and NO interior chevrons: system=aldoks, system_series=yarim, bottom_profile=kasa, pieces=[{kind:v,x:0.5,y:0.5},{kind:h,x:0.5,y:0.2592592593}], records=1. This is FOUR FIXED panes and ZERO openings; the 200 leader outside the left frame is only a dimension arrow. Apply the same reasoning to other dimensions, not a hardcoded size match.
 User drawing convention: one chevron/triangle identifies one operable leaf (door or sash). Opposing chevrons or an X inside an operable opening denote BINILI double leaves: doubleSash for binili kanat, double for binili kapi. This is not a fixed-glass mullion. Show two leaves with no fixed middle mullion. A rectangle above leaves is fixed transom glass; do not turn the entire opening into a full-height sash. A neighboring rectangle is fixed glazing. Crossed-out text/dimensions are corrections, not opening symbols. 'Sonra imalat' is a production note, not a reason to discard an opening.
 Bottom profile is INDEPENDENT of system. User drawing convention: a narrow band at the very BOTTOM of a fixed panel bounded by two parallel horizontal lines denotes ETEK (12 cm), even for ALDOKS. Set bottom_profile=etek for that position. Do not convert the band to a horizontal mullion, and do not default all Aldoks bottoms to kasa. A line above a door/leaf is a transom record, not an etek. A band inside a leaf is its leaf-bottom etek, not a fixed outer threshold. Use bottom_profile=kasa only for clearly indicated frame bottom; otherwise null.
 Read labels BELOW the drawings and in notebook captions, not just above them. 'ALDOKS YARIM SERİ', 'yarım', 'yarim seri' and 'dar seri' all require system=aldoks, system_series=yarim; 'tam seri' and 'orta seri' require system_series=tam. Do not lose this explicit word when extracting dimensions. A caption beneath one drawing applies locally; a clearly common caption beneath a group applies to that group, never to unrelated C60 positions.
@@ -108,6 +110,10 @@ def validate_result(result):
                     pos['bottom_profile']='etek'
                 if isinstance(raw_piece,dict) and str(raw_piece.get('kind') or raw_piece.get('type') or '').lower() in {'window','singlewindow','panel','pencere'}:generic_count+=1
                 continue
+            if p['kind'] in {'door','double','sash','doubleSash'}:
+                symbol=str(p.get('opening_symbol') or '').strip().lower()
+                if symbol not in {'single_chevron','double_chevron','binili_symbol'}:
+                    raise ValueError('P'+str(i)+' kanat/kapı için iç açılım işareti doğrulanamadı; ölçü oku kanat sayılamaz')
             normalized.append(p)
             for key in ('x','y','doorWidth','doorHeight'):
                 if p.get(key) is not None:
@@ -147,7 +153,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v129','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v131','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
