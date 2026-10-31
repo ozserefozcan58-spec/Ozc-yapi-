@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v122-openings'
+VERSION = 'ozc-v139-bottom-evidence'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -24,10 +24,11 @@ Read labels BELOW the drawings and in notebook captions, not just above them. 'A
 Respect labels local to each position: Aldoks written above a WC door applies to that door only. C60/RW60 and Aldoks must never be merged into one system for all positions. Labels may apply to neighboring similar doors. If Aldoks series (tam/yarim) is absent, report system=aldoks and system_series=null, plus a Turkish warning. Do not guess profile series.
 Top-level keys: customer, project, system (c60/aldoks/null), glass, positions, warnings (Turkish strings).
 Do not emit fixed glass, outer frames, sills or glazing beads in pieces; they are implicit. Only mullions and operable openings belong in pieces.
-Each position: bottom_profile (etek/kasa/null), width, height, system (c60/aldoks/null), system_series (tam/yarim/null), records, pieces, warnings, note.
+Each position: bottom_evidence (single_line/paired_lines/unclear), bottom_profile (etek/kasa/null), width, height, system (c60/aldoks/null), system_series (tam/yarim/null), records, pieces, warnings, note.
 width/height must come from clearly written outside dimensions, never proportions. Use null for unreadable dimensions and warn; retain original visual order.
 records counts fixed vertical mullions only, NOT sash stiles, double-leaf meeting stiles, frames or dimension ticks.
 pieces contains all visible fixed mullions AND all openings. Allowed kind: v,h,hv,hh,door,double,sash,doubleSash. single_chevron/double_chevron/binili_symbol are opening_symbol values, NEVER kind values. Normalized x/y are visual layout coordinates (0..1) only. Opening pieces require bounds={left,right,top,bottom} describing the visible opening within the outer frame (0..1), align=left/center/right, side=left/right, mainSide=right unless explicitly indicated. doorWidth/doorHeight must be explicit written internal opening dimensions, otherwise null. Flag schematic=true when bounds are estimated from sketch proportions. These proportions are for schematic display only, never manufacturing measurements. For doors with missing written internal measurements return doorWidth=null and/or doorHeight=null. The application applies the user-approved defaults (single 90 x 220 cm, double 180 x 220 cm) only for those missing axes; never fill a missing door measurement from proportions. A marked opening reaching the floor is a door; a fixed rectangle above it remains a transom. Keep its left/right location. For sash/doubleSash without written dimensions retain null and schematic bounds; do not apply door defaults to windows. v/h pieces use x/y. h means FULL frame width: use it only for a line visibly crossing all bays. A line only above a side door MUST be hh with doorSpan=[left,right] limited to that side bay, never h. Set scope=full only for a confirmed full-width horizontal. hh also includes doorSpan=[left,right]. Do not duplicate an opening edge if the shared fixed mullion is already represented. If an opening symbol exists, pieces MUST NOT be empty. If type is uncertain, preserve your best structural classification and explain in Turkish warnings, rather than silently returning fixed glazing.
+Mandatory visual evidence: set bottom_evidence separately for EVERY position AFTER tracing its own fixed pane bottom. single_line means exactly one hand-drawn bottom boundary and requires bottom_profile=kasa. paired_lines means TWO distinct hand-drawn, closely spaced parallel bottom strokes bounding a narrow band on at least one FIXED pane and requires bottom_profile=etek. Ignore printed notebook grid lines, paper edges, shadows, retraced thick strokes, upper transoms and bands inside moving leaves. Never copy bottom classification from a neighboring position. If strokes cannot be distinguished, use unclear and bottom_profile=null. Do not infer evidence from the system, dimensions or your previously selected bottom_profile.
 Final bottom audit: independently inspect the bottom of EACH FIXED pane, including panes beside a door. If only the fixed side has a double horizontal bottom line and the door side has no fixed threshold, still set position bottom_profile=etek; the drawing engine cuts that etek at the door. Never require the band to run across the entire position. Example: caption tam seri aldoks, left fixed pane with paired bottom lines, right floor-reaching single chevron plus fixed rectangle above: one door, left etek, right transom, not four-side kasa.
 Before returning check: all labeled Aldoks positions have their own system; every opening symbol has an opening piece; double leaves are typed double/doubleSash; transoms remain fixed; only written outside dimensions become actual measurements.'''
 
@@ -124,6 +125,12 @@ def validate_result(result):
         bottom=pos.get('bottom_profile',pos.get('bottom'))
         bottom_aliases={'etek':'etek','sill':'etek','bottom_sill':'etek','12 cm etek':'etek','kasa':'kasa','frame':'kasa'}
         pos['bottom_profile']=bottom_aliases.get(str(bottom).strip().lower()) if bottom is not None else None
+        evidence=pos.get('bottom_evidence')
+        if evidence not in {'single_line','paired_lines','unclear'}:evidence='unclear'
+        pos['bottom_evidence']=evidence
+        if evidence=='single_line':pos['bottom_profile']='kasa'
+        elif evidence=='paired_lines':pos['bottom_profile']='etek'
+        else:pos['bottom_profile']=None
         normalized=[]
         generic_count=0
         for raw_piece in parts:
@@ -132,7 +139,7 @@ def validate_result(result):
             if p is None:
                 raw_kind=str(raw_piece.get('kind') or raw_piece.get('type') or '').lower() if isinstance(raw_piece,dict) else ''
                 if raw_kind in {'etek','sill','bottom_sill','bottomsill'} and raw_piece.get('scope') not in {'leaf','sash','door'}:
-                    pos['bottom_profile']='etek'
+                    if pos['bottom_evidence']=='paired_lines':pos['bottom_profile']='etek'
                 if isinstance(raw_piece,dict) and str(raw_piece.get('kind') or raw_piece.get('type') or '').lower() in {'window','singlewindow','panel','pencere'}:generic_count+=1
                 continue
             if p['kind'] in {'door','double','sash','doubleSash'}:
@@ -189,7 +196,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v137','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v139','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -206,7 +213,7 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
     url = 'data:'+image.content_type+';base64,'+base64.b64encode(content).decode()
     try:
         messages=[{'role':'system','content':INSTRUCTIONS},
-                  {'role':'user','content':[{'type':'text','text':'Read every position, including opening symbols, binili kanat and local Aldoks labels. Return the complete JSON schema. Every opening piece must include its own opening_symbol.'},
+                  {'role':'user','content':[{'type':'text','text':'Read every position, including opening symbols, binili kanat and local Aldoks labels. Return the complete JSON schema. Independently trace each fixed bottom and include bottom_evidence=single_line/paired_lines/unclear for EACH position. Every opening piece must include its own opening_symbol.'},
                                             {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}]
         async with AsyncOpenAI(api_key=key, timeout=50, max_retries=0) as client:
             async def request_analysis(review=False):
@@ -231,7 +238,7 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
             if review_reason:
                 messages.append({'role':'user','content':[{'type':'text','text':
                     'Recheck the ORIGINAL PHOTO independently. '+review_reason+
-                    ' Mentally rotate if needed. Return FULL corrected JSON with all dimensions, mullions, transoms, series and bottom_profile. Include opening_symbol on each real opening. Preserve real openings. Set bottom_profile=etek for paired bottom lines on any fixed side pane, kasa for a single frame line, null only if unreadable. Do not invent evidence.'}]})
+                    ' Mentally rotate if needed. Return FULL corrected JSON with all dimensions, mullions, transoms, series and bottom_profile. Include opening_symbol on each real opening. Preserve real openings. Return bottom_evidence for each position: paired_lines requires etek, single_line requires kasa, unclear requires null. Count only hand-drawn strokes at that position fixed bottom, ignoring printed grid lines. A band only beside a door still counts. Do not copy evidence between positions. Do not invent evidence.'}]})
                 result = validate_result(await request_analysis(review=True))
         return {'result':result,'analyzer_version':VERSION}
     except Exception as exc:
