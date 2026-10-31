@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v149-bay-consistency'
+VERSION = 'ozc-v150-schematic-bounds'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -195,7 +195,19 @@ def validate_result(result):
                 if bays[bay].get('type')=='fixed':
                     raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' kapı sabit cam bölmesine konmuş; eksik dikey kayıt veya yanlış kapı sınırı')
                 if box['left']<edges[bay]-.02 or box['right']>edges[bay+1]+.02:
-                    raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' açılım sabit kayıt üzerinden komşu bölmeye taşıyor')
+                    expected_type=bays[bay].get('type')
+                    same_family=(expected_type in {'door','double'} and opening['kind'] in {'door','double'}) or (expected_type in {'sash','doubleSash'} and opening['kind'] in {'sash','doubleSash'})
+                    # Sketch proportions are not manufacturing measurements. A single
+                    # opening with matching bay evidence belongs inside that bay.
+                    occupants=[q for q in normalized if q['kind'] in {'door','double','sash','doubleSash'} and isinstance(q.get('bounds') or q.get('opening'),dict) and edges[bay]<=(lambda b:(b['left']+b['right'])/2)(q.get('bounds') or q.get('opening'))<edges[bay+1]]
+                    if opening.get('schematic') is True and same_family and len(occupants)==1:
+                        box['left']=edges[bay];box['right']=edges[bay+1]
+                        opening['x']=(edges[bay]+edges[bay+1])/2
+                        pos.setdefault('warnings',[])
+                        if not isinstance(pos['warnings'],list):pos['warnings']=[]
+                        pos['warnings'].append('Şematik açılım sınırı kendi yapısal bölmesine hizalandı; yazılı ölçüler korundu.')
+                    else:
+                        raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' açılım sabit kayıt üzerinden komşu bölmeye taşıyor')
                 expected=bays[bay].get('type')
                 if expected in {'double','doubleSash'} and opening['kind'] in {'door','sash'}:
                     raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' binili bölme tek kanat olarak aktarılmış')
@@ -227,7 +239,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v149','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v150','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
