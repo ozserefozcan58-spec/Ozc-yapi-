@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v145-record-measures'
+VERSION = 'ozc-v146-record-review'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -159,7 +159,7 @@ def validate_result(result):
                 try: offset=float(str(p['position_from_left_cm']).replace(',','.'))
                 except (ValueError,TypeError):raise ValueError('Kayıt konumu sayısal değil')
                 if not math.isfinite(offset) or not pos.get('width') or not 0<offset<pos['width']:
-                    raise ValueError('Kayıt konumu dış ölçünün dışında')
+                    raise ValueError('Kayıt konumu dış ölçünün dışında: P'+str(i)+', soldan konum='+str(offset)+' cm, dış en='+str(pos.get('width'))+' cm')
                 p['x']=offset/pos['width']
             normalized.append(p)
             for key in ('x','y','doorWidth','doorHeight'):
@@ -205,7 +205,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v145','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v146','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -240,8 +240,8 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 if any(p.get('bottom_profile') is None for p in result['positions']):
                     review_reason='At least one bottom_profile is null. Inspect each fixed pane bottom carefully for the paired horizontal ETEK band, including a band only beside a door. Recheck all local transoms: a record above a side door is hh with doorSpan, not a full-width h.'
             except ValueError as exc:
-                if not any(reason in str(exc) for reason in ('iç açılım işareti doğrulanamadı','Bölme sayısı ile dikey kayıt sayısı uyuşmuyor')):raise
-                review_reason=str(exc)+'. Recount STRUCTURAL bays along the TOP edge, not glass panes or leaves. A double door counts as ONE bay and its meeting stile is NOT v. Keep every fixed bay between separate doors. Correct the inconsistent pieces or audit from the photo; never add a divider just to satisfy arithmetic.'
+                if not any(reason in str(exc) for reason in ('iç açılım işareti doğrulanamadı','Bölme sayısı ile dikey kayıt sayısı uyuşmuyor','Kayıt konumu dış ölçünün dışında')):raise
+                review_reason=str(exc)+'. Recheck written record-distance leaders and their units against the ORIGINAL photo. position_from_left_cm must be an actual left-outside-edge to divider CENTER distance in CENTIMETERS, strictly within outside width. Do not confuse outside width, height, panel width, stock lengths, or a neighboring position dimension with this offset. Convert mm to cm only when the written unit confirms millimeters. If unreadable, return null and warn in Turkish; never clamp or invent an offset. Recount STRUCTURAL bays along the TOP edge, not glass panes or leaves. A double door counts as ONE bay and its meeting stile is NOT v. Keep every fixed bay between separate doors. Correct the inconsistent pieces or audit from the photo; never add a divider just to satisfy arithmetic.'
             if review_reason is None and any(sum(q['kind'] in {'door','double','sash','doubleSash'} for q in p['pieces'])>=2 for p in result['positions']):
                 review_reason='Multiple operable openings: independently count the top-edge vertical dividers and every fixed bay BETWEEN openings. Verify layout_audit, door versus window using ground openings, all written record distances, and separate hh transoms without crossing intervening fixed panes.'
             if review_reason is None and any(q.get('leaf_count') not in (1,2) or not isinstance(q.get('floor_opening'),bool) or not isinstance(q.get('fixed_sill_below'),bool) or not isinstance(q.get('has_transom'),bool) for p in result['positions'] for q in p['pieces'] if q['kind'] in {'door','double','sash','doubleSash'}):
