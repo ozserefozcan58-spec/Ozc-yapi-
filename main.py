@@ -1,9 +1,10 @@
 import os, base64, json, secrets, math, logging, unicodedata
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v150-schematic-bounds'
+VERSION = 'ozc-v151-error-report'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -239,7 +240,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v150','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v151','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -254,6 +255,9 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
     content = await image.read(10*1024*1024+1)
     if len(content)>10*1024*1024: raise HTTPException(413, 'Maximum image size 10MB')
     url = 'data:'+image.content_type+';base64,'+base64.b64encode(content).decode()
+    analysis_attempts=[]
+    stage='initial_analysis'
+    review_reason=None
     try:
         messages=[{'role':'system','content':INSTRUCTIONS},
                   {'role':'user','content':[{'type':'text','text':'Read every position, including opening symbols, binili kanat and local Aldoks labels. Return the complete JSON schema. Independently trace each fixed bottom and include bottom_evidence=single_line/paired_lines/unclear for EACH position. Every opening piece must include its own opening_symbol.'},
@@ -266,8 +270,12 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                     timeout=25 if review else 50, messages=messages)
                 if response.choices[0].finish_reason != 'stop':
                     raise ValueError('Yanıt tamamlanmadı; görseli daha az poz içerecek şekilde bölüp deneyin')
-                return json.loads(response.choices[0].message.content)
+                parsed=json.loads(response.choices[0].message.content)
+                # Snapshot before validation, which normalizes the response in place.
+                analysis_attempts.append({'stage':'review' if review else 'initial','result':json.loads(json.dumps({k:parsed.get(k) for k in ('system','glass','positions','warnings')}))})
+                return parsed
             raw = await request_analysis()
+            stage='initial_validation'
             review_reason=None
             try:
                 result = validate_result(raw)
@@ -290,7 +298,13 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 messages.append({'role':'user','content':[{'type':'text','text':
                     'Recheck the ORIGINAL PHOTO independently. '+review_reason+
                     ' Mentally rotate if needed. Return FULL corrected JSON with all dimensions, mullions, transoms, series and bottom_profile. Include opening_symbol on each real opening. Preserve real openings. Return bottom_evidence for each position: paired_lines requires etek, single_line requires kasa, unclear requires null. Count only hand-drawn strokes at that position fixed bottom, ignoring printed grid lines. A band only beside a door still counts. Do not copy evidence between positions. Do not invent evidence.'}]})
-                result = validate_result(await request_analysis(review=True))
+                stage='review_analysis'
+                reviewed=await request_analysis(review=True)
+                stage='review_validation'
+                result = validate_result(reviewed)
         return {'result':result,'analyzer_version':VERSION}
     except Exception as exc:
-        raise HTTPException(502, analysis_error(exc))
+        detail=analysis_error(exc)
+        if isinstance(exc,(ValueError,json.JSONDecodeError)):
+            return JSONResponse(status_code=502,content={'detail':detail,'analyzer_version':VERSION,'diagnostics':{'stage':stage,'review_reason':review_reason,'attempts':analysis_attempts}})
+        raise HTTPException(502, detail)
