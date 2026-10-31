@@ -25,7 +25,7 @@ Do not emit fixed glass, outer frames, sills or glazing beads in pieces; they ar
 Each position: bottom_profile (etek/kasa/null), width, height, system (c60/aldoks/null), system_series (tam/yarim/null), records, pieces, warnings, note.
 width/height must come from clearly written outside dimensions, never proportions. Use null for unreadable dimensions and warn; retain original visual order.
 records counts fixed vertical mullions only, NOT sash stiles, double-leaf meeting stiles, frames or dimension ticks.
-pieces contains all visible fixed mullions AND all openings. Allowed kind: v,h,hv,hh,door,double,sash,doubleSash. single_chevron/double_chevron/binili_symbol are opening_symbol values, NEVER kind values. Normalized x/y are visual layout coordinates (0..1) only. Opening pieces require bounds={left,right,top,bottom} describing the visible opening within the outer frame (0..1), align=left/center/right, side=left/right, mainSide=right unless explicitly indicated. doorWidth/doorHeight must be explicit written internal opening dimensions, otherwise null. Flag schematic=true when bounds are estimated from sketch proportions. These proportions are for schematic display only, never manufacturing measurements. For doors with missing written internal measurements return doorWidth=null and/or doorHeight=null. The application applies the user-approved defaults (single 90 x 220 cm, double 180 x 220 cm) only for those missing axes; never fill a missing door measurement from proportions. A marked opening reaching the floor is a door; a fixed rectangle above it remains a transom. Keep its left/right location. For sash/doubleSash without written dimensions retain null and schematic bounds; do not apply door defaults to windows. v/h pieces use x/y; hh also includes doorSpan=[left,right]. Do not duplicate an opening edge if the shared fixed mullion is already represented. If an opening symbol exists, pieces MUST NOT be empty. If type is uncertain, preserve your best structural classification and explain in Turkish warnings, rather than silently returning fixed glazing.
+pieces contains all visible fixed mullions AND all openings. Allowed kind: v,h,hv,hh,door,double,sash,doubleSash. single_chevron/double_chevron/binili_symbol are opening_symbol values, NEVER kind values. Normalized x/y are visual layout coordinates (0..1) only. Opening pieces require bounds={left,right,top,bottom} describing the visible opening within the outer frame (0..1), align=left/center/right, side=left/right, mainSide=right unless explicitly indicated. doorWidth/doorHeight must be explicit written internal opening dimensions, otherwise null. Flag schematic=true when bounds are estimated from sketch proportions. These proportions are for schematic display only, never manufacturing measurements. For doors with missing written internal measurements return doorWidth=null and/or doorHeight=null. The application applies the user-approved defaults (single 90 x 220 cm, double 180 x 220 cm) only for those missing axes; never fill a missing door measurement from proportions. A marked opening reaching the floor is a door; a fixed rectangle above it remains a transom. Keep its left/right location. For sash/doubleSash without written dimensions retain null and schematic bounds; do not apply door defaults to windows. v/h pieces use x/y. h means FULL frame width: use it only for a line visibly crossing all bays. A line only above a side door MUST be hh with doorSpan=[left,right] limited to that side bay, never h. Set scope=full only for a confirmed full-width horizontal. hh also includes doorSpan=[left,right]. Do not duplicate an opening edge if the shared fixed mullion is already represented. If an opening symbol exists, pieces MUST NOT be empty. If type is uncertain, preserve your best structural classification and explain in Turkish warnings, rather than silently returning fixed glazing.
 Final bottom audit: independently inspect the bottom of EACH FIXED pane, including panes beside a door. If only the fixed side has a double horizontal bottom line and the door side has no fixed threshold, still set position bottom_profile=etek; the drawing engine cuts that etek at the door. Never require the band to run across the entire position. Example: caption tam seri aldoks, left fixed pane with paired bottom lines, right floor-reaching single chevron plus fixed rectangle above: one door, left etek, right transom, not four-side kasa.
 Before returning check: all labeled Aldoks positions have their own system; every opening symbol has an opening piece; double leaves are typed double/doubleSash; transoms remain fixed; only written outside dimensions become actual measurements.'''
 
@@ -170,7 +170,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v134','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v135','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -199,13 +199,18 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                     raise ValueError('Yanıt tamamlanmadı; görseli daha az poz içerecek şekilde bölüp deneyin')
                 return json.loads(response.choices[0].message.content)
             raw = await request_analysis()
+            review_reason=None
             try:
                 result = validate_result(raw)
+                if any(p.get('bottom_profile') is None for p in result['positions']):
+                    review_reason='At least one bottom_profile is null. Inspect each fixed pane bottom carefully for the paired horizontal ETEK band, including a band only beside a door. Recheck all local transoms: a record above a side door is hh with doorSpan, not a full-width h.'
             except ValueError as exc:
                 if 'iç açılım işareti doğrulanamadı' not in str(exc):raise
-                # Re-read the original photo; never invent evidence from the predicted kind.
+                review_reason='An opening was proposed without opening_symbol. Recheck interior opening marks versus exterior dimension arrows.'
+            if review_reason:
                 messages.append({'role':'user','content':[{'type':'text','text':
-                    'Recheck the ORIGINAL PHOTO independently: the previous extraction proposed an opening without its required opening_symbol. Rotate mentally if needed. Distinguish external dimension arrows from long interior chevrons/triangles. Return the FULL corrected JSON. Keep every visible fixed mullion, transom, written dimension, local series and bottom band. Only include an opening if its interior symbol is visible and set opening_symbol on that piece. Do not remove a real opening merely because the first extraction omitted its evidence field.'}]})
+                    'Recheck the ORIGINAL PHOTO independently. '+review_reason+
+                    ' Mentally rotate if needed. Return FULL corrected JSON with all dimensions, mullions, transoms, series and bottom_profile. Include opening_symbol on each real opening. Preserve real openings. Set bottom_profile=etek for paired bottom lines on any fixed side pane, kasa for a single frame line, null only if unreadable. Do not invent evidence.'}]})
                 result = validate_result(await request_analysis(review=True))
         return {'result':result,'analyzer_version':VERSION}
     except Exception as exc:
