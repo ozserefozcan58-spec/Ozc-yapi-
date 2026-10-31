@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v153-schematic-bay-order'
+VERSION = 'ozc-v154-leaf-bay-index'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -253,7 +253,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v153','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v154','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -320,15 +320,18 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
             for pi,pos in enumerate(result['positions']):
                 for oi,piece in enumerate(pos['pieces']):
                     if piece['kind'] in {'door','sash'}:
-                        targets.append({'position_index':pi,'piece_index':oi,'bounds':piece.get('bounds') or piece.get('opening')})
+                        box=piece.get('bounds') or piece.get('opening') or {}
+                        center=(box.get('left',0)+box.get('right',1))/2
+                        bay_index=sum(q['kind']=='v' and q.get('x',0)<center for q in pos['pieces'])
+                        targets.append({'position_index':pi,'piece_index':oi,'structural_bay_index':bay_index,'structural_bay_count':sum(q['kind']=='v' for q in pos['pieces'])+1})
             if targets:
                 stage='leaf_count_audit'
                 try:
                     audit_response=await client.chat.completions.create(
                         model=os.getenv('OPENAI_MODEL','gpt-4.1-mini'),
                         response_format={'type':'json_object'},temperature=0,max_tokens=1800,timeout=15,
-                        messages=[{'role':'system','content':'Inspect ONLY the number of moving leaves in the specified hand-drawn openings. Return JSON {"openings":[{"position_index":0,"piece_index":0,"chevron_count":1,"both_chevrons_visible":false}]}. Index positions in visual top-to-bottom order. Two opposing long chevrons inside the SAME opening indicate TWO leaves even if they do not touch or form an X. Trace the entire left AND right half of each target, especially the rightmost opening. A short handle mark is not a chevron. Count only complete opening chevrons, not transom lines, dimension arrows or neighboring openings. Use chevron_count=null if unclear. Do not output dimensions, frame layout, systems or records.'},
-                                  {'role':'user','content':[{'type':'text','text':'Independently inspect these target regions on the ORIGINAL photo. Bounds are schematic only. '+json.dumps(targets)}, {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}])
+                        messages=[{'role':'system','content':'Inspect ONLY the number of moving leaves in the specified hand-drawn openings. Return JSON {"openings":[{"position_index":0,"piece_index":0,"chevron_count":1,"both_chevrons_visible":false}]}. Position and structural_bay indices are ZERO-BASED. Locate positions top to bottom and structural bays left to right using the PHOTO, not normalized measurement coordinates. Inspect the WHOLE requested bay from its left divider to right divider; do not crop to one leaf. Two opposing long chevrons inside the SAME opening indicate TWO leaves even if they do not touch or form an X. Trace the entire left AND right half of each target, especially the rightmost opening. A short handle mark is not a chevron. Count only complete opening chevrons, not transom lines, dimension arrows or neighboring openings. Use chevron_count=null if unclear. Do not output dimensions, frame layout, systems or records.'},
+                                  {'role':'user','content':[{'type':'text','text':'Independently inspect these target regions on the ORIGINAL photo. Locate targets by position order and structural bay order; numeric measurement proportions are irrelevant. '+json.dumps(targets)}, {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}])
                     if audit_response.choices[0].finish_reason!='stop':raise ValueError('Kanat sayısı kontrol yanıtı tamamlanmadı')
                     leaf_audit=json.loads(audit_response.choices[0].message.content)
                     analysis_attempts.append({'stage':'leaf_count_audit','result':leaf_audit})
@@ -349,7 +352,7 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 except Exception:
                     # Supplemental counting must not discard a valid whole drawing.
                     result.setdefault('warnings',[]).append('Ek kanat sayısı kontrolü tamamlanamadı; tek/binili seçimini önizlemede kontrol edin.')
-        return {'result':result,'analyzer_version':VERSION}
+        return {'result':result,'analyzer_version':VERSION,'diagnostics':{'attempts':[a for a in analysis_attempts if a['stage']=='leaf_count_audit']}}
     except Exception as exc:
         detail=analysis_error(exc)
         if isinstance(exc,(ValueError,json.JSONDecodeError)):
