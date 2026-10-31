@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v152-leaf-audit'
+VERSION = 'ozc-v153-schematic-bay-order'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -186,6 +186,19 @@ def validate_result(result):
             bays=audit['bays']
             if len(bays)!=len(edges)-1:
                 raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' bölme listesi ile kayıt aralıkları farklı')
+            # If the independently enumerated bay sequence has exactly one
+            # opening per operable bay, match schematic openings by left-to-right
+            # order. Their sketch bounds need not be precise measurement data.
+            bay_indices=[j for j,b in enumerate(bays) if b.get('type') in {'door','double','sash','doubleSash'}]
+            opening_parts=sorted([q for q in normalized if q['kind'] in {'door','double','sash','doubleSash'}],key=lambda q: ((q.get('bounds') or q.get('opening') or {}).get('left',q.get('x',0))+(q.get('bounds') or q.get('opening') or {}).get('right',q.get('x',0)))/2)
+            if len(opening_parts)==len(bay_indices):
+                for opening,j in zip(opening_parts,bay_indices):
+                    box=opening.get('bounds') or opening.get('opening')
+                    expected=bays[j].get('type')
+                    same_family=(expected in {'door','double'} and opening['kind'] in {'door','double'}) or (expected in {'sash','doubleSash'} and opening['kind'] in {'sash','doubleSash'})
+                    if opening.get('schematic') is True and box and same_family:
+                        box['left']=edges[j];box['right']=edges[j+1]
+                        opening['x']=(edges[j]+edges[j+1])/2
             for opening in normalized:
                 if opening['kind'] not in {'door','double','sash','doubleSash'}:continue
                 box=opening.get('bounds') or opening.get('opening')
@@ -240,7 +253,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v152','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v153','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -286,7 +299,7 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
             except ValueError as exc:
                 if not any(reason in str(exc) for reason in ('iç açılım işareti doğrulanamadı','Bölme sayısı ile dikey kayıt sayısı uyuşmuyor','Kayıt konumu dış ölçünün dışında','Bölme yerleşimi tutarsız')):raise
                 review_reason=str(exc)+'. Recheck written record-distance leaders and their units against the ORIGINAL photo. position_from_left_cm must be an actual left-outside-edge to divider CENTER distance in CENTIMETERS, strictly within outside width. Do not confuse outside width, height, panel width, stock lengths, or a neighboring position dimension with this offset. Convert mm to cm only when the written unit confirms millimeters. If unreadable, return null and warn in Turkish; never clamp or invent an offset. Recount STRUCTURAL bays along the TOP edge, not glass panes or leaves. A double door counts as ONE bay and its meeting stile is NOT v. Keep every fixed bay between separate doors. Correct the inconsistent pieces or audit from the photo; never add a divider just to satisfy arithmetic.'
-            if review_reason is None and any(sum(q['kind'] in {'door','double','sash','doubleSash'} for q in p['pieces'])>=2 for p in result['positions']):
+            if review_reason is None and any(sum(q['kind'] in {'door','double','sash','doubleSash'} for q in p['pieces'])>=2 and not isinstance(p.get('layout_audit'),dict) for p in result['positions']):
                 review_reason='Multiple operable openings: independently count the top-edge vertical dividers and every fixed bay BETWEEN openings. Verify layout_audit, door versus window using ground openings, all written record distances, and separate hh transoms without crossing intervening fixed panes.'
             if review_reason is None and any(q.get('leaf_count') not in (1,2) or not isinstance(q.get('floor_opening'),bool) or not isinstance(q.get('fixed_sill_below'),bool) or not isinstance(q.get('has_transom'),bool) for p in result['positions'] for q in p['pieces'] if q['kind'] in {'door','double','sash','doubleSash'}):
                 review_reason='Opening evidence fields missing. Independently inspect each opening for ONE versus TWO chevrons, whether it reaches the ground WITHOUT a fixed sill, and whether a fixed transom rectangle is above it. Read every below-frame written record-distance arrow and emit position_from_left_cm on its v piece. Independently count BOTH chevrons in every rightmost opening. Return leaf_count, floor_opening, fixed_sill_below and has_transom on EACH opening, with corrected kind, opening_symbol and local hh transoms. A pair of opposing chevrons in a ground opening is one double DOOR, not a doubleSash or single door.'
