@@ -14,6 +14,8 @@ Read ALL positions in visual order, left to right and top to bottom. Ignore mate
 Extract THREE separate things for EVERY position: (1) written outside width/height in cm, (2) frame/mullion layout, (3) opening symbols and system labels. Do not stop after measuring rectangles.
 An unmarked rectangular panel is FIXED glazing. The generic word window/pencere never means operable sash. Short diagonal measurement ticks across outer edges or across a fixed mullion are dimension marks, NEVER sash symbols. Only clear chevrons/X INSIDE the glazing, made of long lines meeting within the pane, are opening evidence. A vertical divider alone does not indicate a sash. Return opening_symbol=single_chevron/double_chevron/binili_symbol for every operable opening. Use no opening pieces for panels without interior opening marks. For handwritten corrected heights, use the uncrossed latest value; different heights on different positions are not contradictions.
 Mentally rotate sideways photographs until the handwritten captions and dimensions are upright before classifying openings. A single large triangle/chevron inside a lower side bay IS a real opening symbol even when it touches the outer edge; a fixed rectangle above it must remain a transom. For EVERY opening piece put opening_symbol directly on that piece (single_chevron, double_chevron or binili_symbol), never only in a note or position-level field.
+Count the full-height interior vertical dividers across the TOP of the frame first. N dividers means N+1 structural bays. Do not force equal thirds or merge a blank fixed bay between two doors. Read bays left to right before assigning any openings. For EACH position include layout_audit={bay_count,vertical_record_count,bays:[{type:fixed/door/double/sash/doubleSash,has_transom:boolean}]}. Count door meeting stiles separately from fixed dividers. An alternating fixed / single door / fixed / double door drawing has FOUR bays and THREE full-height vertical mullions, with TWO SEPARATE short transoms, one above each door. A fixed bay between doors must remain intact. Do not bridge the two transoms through that fixed bay. This applies regardless of outside dimensions.
+A chevron in a bay with NO bottom threshold, reaching the same ground line as the neighboring fixed etek, identifies a FLOOR DOOR rather than a window sash. Set floor_opening=true only when this ground opening is visually clear, false for windows with a fixed sill below. Use kind=door or double for floor openings and retain bounds for the actual full opening up to its transom. Do not invert top/bottom coordinates: y=0 at the top, y=1 at the ground. A transom near the upper quarter cannot have y near 0.66. For a labeled outside-to-record distance, emit position_from_left_cm on the v piece; preserve this written position instead of equal spacing. Exterior dimension arrows are measurements, not opening marks. Missing internal door dimensions stay null so the app uses standard doors.
 First trace the structural grid before looking for openings. Outside arrows, leaders, curved arrows pointing at a record, dimension numerals and notebook grid lines are NEVER opening evidence. A horizontal line spanning the frame is a fixed horizontal mullion even when it crosses a vertical mullion. Keep BOTH records at their intersection. Never replace this grid with leaves based on the number, width or height of its rectangular panels.
 For a written record height measured from the bottom, set h.y=(outside_height-written_height_from_bottom)/outside_height, not written_height_from_bottom/outside_height. Example: outside 300 x 270, one central vertical line, one full horizontal line labeled 200 from below, caption 'dar seri aldoks', and NO interior chevrons: system=aldoks, system_series=yarim, bottom_profile=kasa, pieces=[{kind:v,x:0.5,y:0.5},{kind:h,x:0.5,y:0.2592592593}], records=1. This is FOUR FIXED panes and ZERO openings; the 200 leader outside the left frame is only a dimension arrow. Apply the same reasoning to other dimensions, not a hardcoded size match.
 User drawing convention: one chevron/triangle identifies one operable leaf (door or sash). Opposing chevrons or an X inside an operable opening denote BINILI double leaves: doubleSash for binili kanat, double for binili kapi. This is not a fixed-glass mullion. Show two leaves with no fixed middle mullion. A rectangle above leaves is fixed transom glass; do not turn the entire opening into a full-height sash. A neighboring rectangle is fixed glazing. Crossed-out text/dimensions are corrections, not opening symbols. 'Sonra imalat' is a production note, not a reason to discard an opening.
@@ -83,6 +85,9 @@ def canonical_piece(piece):
     if piece.get('opening_symbol') in {'double_chevron','binili_symbol'}:
         if kind=='door':kind='double'
         elif kind=='sash':kind='doubleSash'
+    if piece.get('floor_opening') is True:
+        if kind=='sash':kind='door'
+        elif kind=='doubleSash':kind='double'
     out=dict(piece);out['kind']=kind
     return out
 
@@ -134,6 +139,12 @@ def validate_result(result):
                 symbol=str(p.get('opening_symbol') or '').strip().lower()
                 if symbol not in {'single_chevron','double_chevron','binili_symbol'}:
                     raise ValueError('P'+str(i)+' kanat/kapı için iç açılım işareti doğrulanamadı; ölçü oku kanat sayılamaz')
+            if p['kind']=='v' and p.get('position_from_left_cm') is not None:
+                try: offset=float(str(p['position_from_left_cm']).replace(',','.'))
+                except (ValueError,TypeError):raise ValueError('Kayıt konumu sayısal değil')
+                if not math.isfinite(offset) or not pos.get('width') or not 0<offset<pos['width']:
+                    raise ValueError('Kayıt konumu dış ölçünün dışında')
+                p['x']=offset/pos['width']
             normalized.append(p)
             for key in ('x','y','doorWidth','doorHeight'):
                 if p.get(key) is not None:
@@ -145,6 +156,11 @@ def validate_result(result):
                     try:p[key]={k:float(str(p[key][k]).replace(',','.')) for k in ('left','right','top','bottom')}
                     except (KeyError,TypeError,ValueError):raise ValueError('P'+str(i)+' kanat sınırları eksik')
                     if not all(math.isfinite(v) for v in p[key].values()):raise ValueError('Kanat sınırları sonlu değil')
+        audit=pos.get('layout_audit')
+        if isinstance(audit,dict) and isinstance(audit.get('bay_count'),int):
+            actual=sum(p['kind']=='v' for p in normalized)
+            if audit['bay_count']!=actual+1:
+                raise ValueError('Bölme sayısı ile dikey kayıt sayısı uyuşmuyor')
         pos['pieces'] = normalized[:40]
         if generic_count:
             warnings=pos.get('warnings')
@@ -173,7 +189,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v136','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v137','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -208,8 +224,10 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 if any(p.get('bottom_profile') is None for p in result['positions']):
                     review_reason='At least one bottom_profile is null. Inspect each fixed pane bottom carefully for the paired horizontal ETEK band, including a band only beside a door. Recheck all local transoms: a record above a side door is hh with doorSpan, not a full-width h.'
             except ValueError as exc:
-                if 'iç açılım işareti doğrulanamadı' not in str(exc):raise
-                review_reason='An opening was proposed without opening_symbol. Recheck interior opening marks versus exterior dimension arrows.'
+                if not any(reason in str(exc) for reason in ('iç açılım işareti doğrulanamadı','Bölme sayısı ile dikey kayıt sayısı uyuşmuyor')):raise
+                review_reason='Opening evidence or bay/divider counts were inconsistent. Recount the entire structural grid, preserve intervening fixed bays and verify opening_symbol for every opening.'
+            if review_reason is None and any(sum(q['kind'] in {'door','double','sash','doubleSash'} for q in p['pieces'])>=2 for p in result['positions']):
+                review_reason='Multiple operable openings: independently count the top-edge vertical dividers and every fixed bay BETWEEN openings. Verify layout_audit, door versus window using ground openings, all written record distances, and separate hh transoms without crossing intervening fixed panes.'
             if review_reason:
                 messages.append({'role':'user','content':[{'type':'text','text':
                     'Recheck the ORIGINAL PHOTO independently. '+review_reason+
