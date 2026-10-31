@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v151-error-report'
+VERSION = 'ozc-v152-leaf-audit'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -240,7 +240,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v151','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v152','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -302,6 +302,40 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 reviewed=await request_analysis(review=True)
                 stage='review_validation'
                 result = validate_result(reviewed)
+            # Focused visual leaf count: do not ask the model to regenerate layout.
+            targets=[]
+            for pi,pos in enumerate(result['positions']):
+                for oi,piece in enumerate(pos['pieces']):
+                    if piece['kind'] in {'door','sash'}:
+                        targets.append({'position_index':pi,'piece_index':oi,'bounds':piece.get('bounds') or piece.get('opening')})
+            if targets:
+                stage='leaf_count_audit'
+                try:
+                    audit_response=await client.chat.completions.create(
+                        model=os.getenv('OPENAI_MODEL','gpt-4.1-mini'),
+                        response_format={'type':'json_object'},temperature=0,max_tokens=1800,timeout=15,
+                        messages=[{'role':'system','content':'Inspect ONLY the number of moving leaves in the specified hand-drawn openings. Return JSON {"openings":[{"position_index":0,"piece_index":0,"chevron_count":1,"both_chevrons_visible":false}]}. Index positions in visual top-to-bottom order. Two opposing long chevrons inside the SAME opening indicate TWO leaves even if they do not touch or form an X. Trace the entire left AND right half of each target, especially the rightmost opening. A short handle mark is not a chevron. Count only complete opening chevrons, not transom lines, dimension arrows or neighboring openings. Use chevron_count=null if unclear. Do not output dimensions, frame layout, systems or records.'},
+                                  {'role':'user','content':[{'type':'text','text':'Independently inspect these target regions on the ORIGINAL photo. Bounds are schematic only. '+json.dumps(targets)}, {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}])
+                    if audit_response.choices[0].finish_reason!='stop':raise ValueError('Kanat sayısı kontrol yanıtı tamamlanmadı')
+                    leaf_audit=json.loads(audit_response.choices[0].message.content)
+                    analysis_attempts.append({'stage':'leaf_count_audit','result':leaf_audit})
+                    allowed={(t['position_index'],t['piece_index']) for t in targets}
+                    entries=leaf_audit.get('openings',[])
+                    counts={}
+                    for entry in entries:
+                        pair=(entry.get('position_index'),entry.get('piece_index'))
+                        counts[pair]=counts.get(pair,0)+1
+                    for entry in entries:
+                        pair=(entry.get('position_index'),entry.get('piece_index'))
+                        if pair not in allowed or counts[pair]!=1:continue
+                        if entry.get('chevron_count')!=2 or entry.get('both_chevrons_visible') is not True:continue
+                        pi,oi=pair;piece=result['positions'][pi]['pieces'][oi]
+                        piece['kind']='double' if piece['kind']=='door' else 'doubleSash'
+                        piece['leaf_count']=2;piece['opening_symbol']='double_chevron'
+                        result['positions'][pi].setdefault('warnings',[]).append('İkinci görsel kontrolde iki açılım işareti doğrulandı; binili kanat olarak düzeltildi.')
+                except Exception:
+                    # Supplemental counting must not discard a valid whole drawing.
+                    result.setdefault('warnings',[]).append('Ek kanat sayısı kontrolü tamamlanamadı; tek/binili seçimini önizlemede kontrol edin.')
         return {'result':result,'analyzer_version':VERSION}
     except Exception as exc:
         detail=analysis_error(exc)
