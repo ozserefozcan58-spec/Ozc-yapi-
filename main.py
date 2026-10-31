@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v146-record-review'
+VERSION = 'ozc-v147-independent-review'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -205,7 +205,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v146','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v147','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -247,7 +247,10 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
             if review_reason is None and any(q.get('leaf_count') not in (1,2) or not isinstance(q.get('floor_opening'),bool) or not isinstance(q.get('fixed_sill_below'),bool) or not isinstance(q.get('has_transom'),bool) for p in result['positions'] for q in p['pieces'] if q['kind'] in {'door','double','sash','doubleSash'}):
                 review_reason='Opening evidence fields missing. Independently inspect each opening for ONE versus TWO chevrons, whether it reaches the ground WITHOUT a fixed sill, and whether a fixed transom rectangle is above it. Read every below-frame written record-distance arrow and emit position_from_left_cm on its v piece. Independently count BOTH chevrons in every rightmost opening. Return leaf_count, floor_opening, fixed_sill_below and has_transom on EACH opening, with corrected kind, opening_symbol and local hh transoms. A pair of opposing chevrons in a ground opening is one double DOOR, not a doubleSash or single door.'
             if review_reason:
-                messages.append({'role':'assistant','content':json.dumps(raw,ensure_ascii=False)})
+                # Start the review from the original photo, without the failed model
+                # response: repeating it can anchor the recount to missing dividers.
+                messages=messages[:2]
+                review_reason+=' First trace ALL full-height INTERNAL vertical strokes from the top frame down to the floor/sill. Each stroke between neighboring structural bays must appear exactly once as kind=v in pieces, including the side jambs separating a door bay from fixed glazing. Only the central moving-leaf meeting stile is excluded. Build layout_audit from that same traced list: vertical_record_count equals the v count and bay_count equals that count plus one. Do not count transom glass as a separate structural bay. Next trace local transoms, then classify openings. Preserve every written dimension and the full list of positions.'
                 messages.append({'role':'user','content':[{'type':'text','text':
                     'Recheck the ORIGINAL PHOTO independently. '+review_reason+
                     ' Mentally rotate if needed. Return FULL corrected JSON with all dimensions, mullions, transoms, series and bottom_profile. Include opening_symbol on each real opening. Preserve real openings. Return bottom_evidence for each position: paired_lines requires etek, single_line requires kasa, unclear requires null. Count only hand-drawn strokes at that position fixed bottom, ignoring printed grid lines. A band only beside a door still counts. Do not copy evidence between positions. Do not invent evidence.'}]})
