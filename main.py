@@ -80,6 +80,9 @@ def canonical_piece(piece):
         if token in ('record','kayit') and orientation in ('vertical','dikey'):kind='v'
         elif token in ('record','kayit') and orientation in ('horizontal','yatay'):kind='h'
         else:raise ValueError('Tanınmayan parça türü: '+(token[:40] or 'tür bilgisi eksik'))
+    if piece.get('opening_symbol') in {'double_chevron','binili_symbol'}:
+        if kind=='door':kind='double'
+        elif kind=='sash':kind='doubleSash'
     out=dict(piece);out['kind']=kind
     return out
 
@@ -170,7 +173,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v135','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v136','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
