@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v140-structural-bays'
+VERSION = 'ozc-v144-opening-evidence'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -30,6 +30,7 @@ records counts fixed vertical mullions only, NOT sash stiles, double-leaf meetin
 pieces contains all visible fixed mullions AND all openings. Allowed kind: v,h,hv,hh,door,double,sash,doubleSash. single_chevron/double_chevron/binili_symbol are opening_symbol values, NEVER kind values. Normalized x/y are visual layout coordinates (0..1) only. Opening pieces require bounds={left,right,top,bottom} describing the visible opening within the outer frame (0..1), align=left/center/right, side=left/right, mainSide=right unless explicitly indicated. doorWidth/doorHeight must be explicit written internal opening dimensions, otherwise null. Flag schematic=true when bounds are estimated from sketch proportions. These proportions are for schematic display only, never manufacturing measurements. For doors with missing written internal measurements return doorWidth=null and/or doorHeight=null. The application applies the user-approved defaults (single 90 x 220 cm, double 180 x 220 cm) only for those missing axes; never fill a missing door measurement from proportions. A marked opening reaching the floor is a door; a fixed rectangle above it remains a transom. Keep its left/right location. For sash/doubleSash without written dimensions retain null and schematic bounds; do not apply door defaults to windows. v/h pieces use x/y. h means FULL frame width: use it only for a line visibly crossing all bays. A line only above a side door MUST be hh with doorSpan=[left,right] limited to that side bay, never h. Set scope=full only for a confirmed full-width horizontal. hh also includes doorSpan=[left,right]. Do not duplicate an opening edge if the shared fixed mullion is already represented. If an opening symbol exists, pieces MUST NOT be empty. If type is uncertain, preserve your best structural classification and explain in Turkish warnings, rather than silently returning fixed glazing.
 Mandatory visual evidence: set bottom_evidence separately for EVERY position AFTER tracing its own fixed pane bottom. single_line means exactly one hand-drawn bottom boundary and requires bottom_profile=kasa. paired_lines means TWO distinct hand-drawn, closely spaced parallel bottom strokes bounding a narrow band on at least one FIXED pane and requires bottom_profile=etek. Ignore printed notebook grid lines, paper edges, shadows, retraced thick strokes, upper transoms and bands inside moving leaves. Never copy bottom classification from a neighboring position. If strokes cannot be distinguished, use unclear and bottom_profile=null. Do not infer evidence from the system, dimensions or your previously selected bottom_profile.
 Final bottom audit: independently inspect the bottom of EACH FIXED pane, including panes beside a door. If only the fixed side has a double horizontal bottom line and the door side has no fixed threshold, still set position bottom_profile=etek; the drawing engine cuts that etek at the door. Never require the band to run across the entire position. Example: caption tam seri aldoks, left fixed pane with paired bottom lines, right floor-reaching single chevron plus fixed rectangle above: one door, left etek, right transom, not four-side kasa.
+Opening evidence audit is REQUIRED on EVERY opening piece: leaf_count=1 or 2, floor_opening=true or false, fixed_sill_below=true or false, has_transom=true or false. Count the actual long chevrons independently of kind. Two opposing chevrons in ONE structural bay require leaf_count=2 and opening_symbol=double_chevron even if they do not meet as an X. An opening reaching the bottom with no horizontal fixed threshold requires floor_opening=true and fixed_sill_below=false; a sill only in the NEIGHBORING fixed bay does not make it a window. A rectangle above those chevrons requires has_transom=true and an hh above that bay. Do not use the top of the outer frame as the leaf top when a transom line exists. Missing door height stays null, so the app applies 220 cm. Classify each opening afresh from the photo, not from its previous kind.
 Before returning check: all labeled Aldoks positions have their own system; every opening symbol has an opening piece; double leaves are typed double/doubleSash; transoms remain fixed; only written outside dimensions become actual measurements.'''
 
 ALLOWED = {'v','h','hv','hh','door','double','sash','doubleSash'}
@@ -143,6 +144,13 @@ def validate_result(result):
                 if isinstance(raw_piece,dict) and str(raw_piece.get('kind') or raw_piece.get('type') or '').lower() in {'window','singlewindow','panel','pencere'}:generic_count+=1
                 continue
             if p['kind'] in {'door','double','sash','doubleSash'}:
+                # Apply explicit visual evidence, never height/proportion heuristics.
+                is_double=p.get('leaf_count')==2 or p.get('opening_symbol') in {'double_chevron','binili_symbol'} or p['kind'] in {'double','doubleSash'}
+                if p.get('floor_opening') is True and p.get('fixed_sill_below') is False:
+                    p['kind']='double' if is_double else 'door'
+                elif is_double:
+                    p['kind']='double' if p['kind']=='door' else 'doubleSash' if p['kind']=='sash' else p['kind']
+                if is_double:p['opening_symbol']='double_chevron'
                 symbol=str(p.get('opening_symbol') or '').strip().lower()
                 if symbol not in {'single_chevron','double_chevron','binili_symbol'}:
                     raise ValueError('P'+str(i)+' kanat/kapı için iç açılım işareti doğrulanamadı; ölçü oku kanat sayılamaz')
@@ -196,7 +204,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v140','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v144','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -235,6 +243,8 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 review_reason=str(exc)+'. Recount STRUCTURAL bays along the TOP edge, not glass panes or leaves. A double door counts as ONE bay and its meeting stile is NOT v. Keep every fixed bay between separate doors. Correct the inconsistent pieces or audit from the photo; never add a divider just to satisfy arithmetic.'
             if review_reason is None and any(sum(q['kind'] in {'door','double','sash','doubleSash'} for q in p['pieces'])>=2 for p in result['positions']):
                 review_reason='Multiple operable openings: independently count the top-edge vertical dividers and every fixed bay BETWEEN openings. Verify layout_audit, door versus window using ground openings, all written record distances, and separate hh transoms without crossing intervening fixed panes.'
+            if review_reason is None and any(q.get('leaf_count') not in (1,2) or not isinstance(q.get('floor_opening'),bool) or not isinstance(q.get('fixed_sill_below'),bool) or not isinstance(q.get('has_transom'),bool) for p in result['positions'] for q in p['pieces'] if q['kind'] in {'door','double','sash','doubleSash'}):
+                review_reason='Opening evidence fields missing. Independently inspect each opening for ONE versus TWO chevrons, whether it reaches the ground WITHOUT a fixed sill, and whether a fixed transom rectangle is above it. Return leaf_count, floor_opening, fixed_sill_below and has_transom on EACH opening, with corrected kind, opening_symbol and local hh transoms. A pair of opposing chevrons in a ground opening is one double DOOR, not a doubleSash or single door.'
             if review_reason:
                 messages.append({'role':'assistant','content':json.dumps(raw,ensure_ascii=False)})
                 messages.append({'role':'user','content':[{'type':'text','text':
