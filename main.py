@@ -13,6 +13,7 @@ INSTRUCTIONS = '''You read Turkish hand-drawn aluminium joinery sheets. Return J
 Read ALL positions in visual order, left to right and top to bottom. Ignore material stock totals as positions.
 Extract THREE separate things for EVERY position: (1) written outside width/height in cm, (2) frame/mullion layout, (3) opening symbols and system labels. Do not stop after measuring rectangles.
 An unmarked rectangular panel is FIXED glazing. The generic word window/pencere never means operable sash. Short diagonal measurement ticks across outer edges or across a fixed mullion are dimension marks, NEVER sash symbols. Only clear chevrons/X INSIDE the glazing, made of long lines meeting within the pane, are opening evidence. A vertical divider alone does not indicate a sash. Return opening_symbol=single_chevron/double_chevron/binili_symbol for every operable opening. Use no opening pieces for panels without interior opening marks. For handwritten corrected heights, use the uncrossed latest value; different heights on different positions are not contradictions.
+Mentally rotate sideways photographs until the handwritten captions and dimensions are upright before classifying openings. A single large triangle/chevron inside a lower side bay IS a real opening symbol even when it touches the outer edge; a fixed rectangle above it must remain a transom. For EVERY opening piece put opening_symbol directly on that piece (single_chevron, double_chevron or binili_symbol), never only in a note or position-level field.
 First trace the structural grid before looking for openings. Outside arrows, leaders, curved arrows pointing at a record, dimension numerals and notebook grid lines are NEVER opening evidence. A horizontal line spanning the frame is a fixed horizontal mullion even when it crosses a vertical mullion. Keep BOTH records at their intersection. Never replace this grid with leaves based on the number, width or height of its rectangular panels.
 For a written record height measured from the bottom, set h.y=(outside_height-written_height_from_bottom)/outside_height, not written_height_from_bottom/outside_height. Example: outside 300 x 270, one central vertical line, one full horizontal line labeled 200 from below, caption 'dar seri aldoks', and NO interior chevrons: system=aldoks, system_series=yarim, bottom_profile=kasa, pieces=[{kind:v,x:0.5,y:0.5},{kind:h,x:0.5,y:0.2592592593}], records=1. This is FOUR FIXED panes and ZERO openings; the 200 leader outside the left frame is only a dimension arrow. Apply the same reasoning to other dimensions, not a hardcoded size match.
 User drawing convention: one chevron/triangle identifies one operable leaf (door or sash). Opposing chevrons or an X inside an operable opening denote BINILI double leaves: doubleSash for binili kanat, double for binili kapi. This is not a fixed-glass mullion. Show two leaves with no fixed middle mullion. A rectangle above leaves is fixed transom glass; do not turn the entire opening into a full-height sash. A neighboring rectangle is fixed glazing. Crossed-out text/dimensions are corrections, not opening symbols. 'Sonra imalat' is a production note, not a reason to discard an opening.
@@ -153,7 +154,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v131','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v132','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -169,15 +170,27 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
     if len(content)>10*1024*1024: raise HTTPException(413, 'Maximum image size 10MB')
     url = 'data:'+image.content_type+';base64,'+base64.b64encode(content).decode()
     try:
-        async with AsyncOpenAI(api_key=key, timeout=75, max_retries=0) as client:
-            response = await client.chat.completions.create(
-                model=os.getenv('OPENAI_MODEL','gpt-4.1-mini'),
-                response_format={'type':'json_object'}, temperature=0,max_tokens=6000,
-                messages=[{'role':'system','content':INSTRUCTIONS},
-                          {'role':'user','content':[{'type':'text','text':'Read every position, including opening symbols, binili kanat and local Aldoks labels. Return the complete JSON schema.'},
-                                                    {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}])
-        if response.choices[0].finish_reason != 'stop': raise ValueError('Yanıt tamamlanmadı; görseli daha az poz içerecek şekilde bölüp deneyin')
-        result = validate_result(json.loads(response.choices[0].message.content))
+        messages=[{'role':'system','content':INSTRUCTIONS},
+                  {'role':'user','content':[{'type':'text','text':'Read every position, including opening symbols, binili kanat and local Aldoks labels. Return the complete JSON schema. Every opening piece must include its own opening_symbol.'},
+                                            {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}]
+        async with AsyncOpenAI(api_key=key, timeout=50, max_retries=0) as client:
+            async def request_analysis(review=False):
+                response = await client.chat.completions.create(
+                    model=os.getenv('OPENAI_MODEL','gpt-4.1-mini'),
+                    response_format={'type':'json_object'}, temperature=0,max_tokens=6000,
+                    timeout=25 if review else 50, messages=messages)
+                if response.choices[0].finish_reason != 'stop':
+                    raise ValueError('Yanıt tamamlanmadı; görseli daha az poz içerecek şekilde bölüp deneyin')
+                return json.loads(response.choices[0].message.content)
+            raw = await request_analysis()
+            try:
+                result = validate_result(raw)
+            except ValueError as exc:
+                if 'iç açılım işareti doğrulanamadı' not in str(exc):raise
+                # Re-read the original photo; never invent evidence from the predicted kind.
+                messages.append({'role':'user','content':[{'type':'text','text':
+                    'Recheck the ORIGINAL PHOTO independently: the previous extraction proposed an opening without its required opening_symbol. Rotate mentally if needed. Distinguish external dimension arrows from long interior chevrons/triangles. Return the FULL corrected JSON. Keep every visible fixed mullion, transom, written dimension, local series and bottom band. Only include an opening if its interior symbol is visible and set opening_symbol on that piece. Do not remove a real opening merely because the first extraction omitted its evidence field.'}]})
+                result = validate_result(await request_analysis(review=True))
         return {'result':result,'analyzer_version':VERSION}
     except Exception as exc:
         raise HTTPException(502, analysis_error(exc))
