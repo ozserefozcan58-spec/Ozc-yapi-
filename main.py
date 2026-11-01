@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v158-upright-bays'
+VERSION = 'ozc-v159-astra'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -250,9 +250,18 @@ def validate_result(result):
             pos['warnings']=warnings
     return result
 
+def analysis_model():
+    return os.getenv('OPENAI_MODEL','gpt-6-astra').strip() or 'gpt-6-astra'
+
+def completion_options(limit):
+    model=analysis_model()
+    if model.startswith(('gpt-6','gpt-5','o1','o3','o4')):
+        return {'max_completion_tokens':limit, 'reasoning_effort':'low'}
+    return {'max_tokens':limit, 'temperature':0}
+
 async def complete_analysis_json(client, messages, attempts, stage, deadline, review=False):
     # Never parse or import a partial JSON response. Retry only token truncation.
-    for attempt, token_limit in enumerate((12000, 16000)):
+    for attempt, token_limit in enumerate((24000, 32000)):
         remaining = deadline - time.monotonic()
         if remaining < 3:
             raise ValueError('Analiz süresi doldu; fotoğrafı daha az pozla yeniden deneyin')
@@ -261,9 +270,9 @@ async def complete_analysis_json(client, messages, attempts, stage, deadline, re
             'Return compact JSON without indentation. Preserve EVERY position and every required field. '
             'Do not repeat the instructions or add prose. Keep Turkish notes brief; do not omit openings or evidence.'})
         response = await client.chat.completions.create(
-            model=os.getenv('OPENAI_MODEL','gpt-4.1-mini'),
-            response_format={'type':'json_object'}, temperature=0, max_tokens=token_limit,
-            timeout=min(50 if not review else 30, remaining-1), messages=request_messages)
+            model=analysis_model(),
+            response_format={'type':'json_object'}, **completion_options(token_limit),
+            timeout=min(100 if not review else 70, remaining-1), messages=request_messages)
         if time.monotonic() >= deadline:
             raise ValueError('Analiz süresi doldu; fotoğrafı daha az pozla yeniden deneyin')
         if not response.choices:
@@ -277,7 +286,7 @@ async def complete_analysis_json(client, messages, attempts, stage, deadline, re
         attempts.append({'stage':stage+'_incomplete','finish_reason':choice.finish_reason,'max_tokens':token_limit,'retry':attempt==0 and choice.finish_reason=='length'})
         if choice.finish_reason != 'length':
             raise ValueError('Analiz yanıtı tamamlanmadı (neden: '+str(choice.finish_reason)+'); çizim aktarılmadı')
-    raise ValueError('Yanıt 16000 token sınırında tamamlanmadı; fotoğrafı daha az poz içerecek şekilde bölüp deneyin')
+    raise ValueError('Yanıt 32000 token sınırında tamamlanmadı; fotoğrafı daha az poz içerecek şekilde bölüp deneyin')
 
 def analysis_error(exc):
     # Do not log request bodies, image contents, credentials or raw exception messages.
@@ -299,7 +308,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v157','capabilities':['opening_symbols','per_position_system','schematic_bounds','system_minimum_sizes','complete_response_retry']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v159','model':analysis_model(),'capabilities':['opening_symbols','per_position_system','schematic_bounds','system_minimum_sizes','complete_response_retry']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -320,9 +329,9 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
     try:
         messages=[{'role':'system','content':INSTRUCTIONS},
                   {'role':'user','content':[{'type':'text','text':'Read every position, including opening symbols, binili kanat and local Aldoks labels. Return the complete JSON schema. Independently trace each fixed bottom and include bottom_evidence=single_line/paired_lines/unclear for EACH position. Every opening piece must include its own opening_symbol.'},
-                                            {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}]
-        async with AsyncOpenAI(api_key=key, timeout=50, max_retries=0) as client:
-            deadline=time.monotonic()+75
+                                            {'type':'image_url','image_url':{'url':url,'detail':'original' if analysis_model().startswith('gpt-6') else 'high'}}]}]
+        async with AsyncOpenAI(api_key=key, timeout=110, max_retries=0) as client:
+            deadline=time.monotonic()+210
             async def request_analysis(review=False):
                 return await complete_analysis_json(client,messages,analysis_attempts,'review' if review else 'initial',deadline,review)
             raw = await request_analysis()
@@ -366,10 +375,10 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 stage='leaf_count_audit'
                 try:
                     audit_response=await client.chat.completions.create(
-                        model=os.getenv('OPENAI_MODEL','gpt-4.1-mini'),
-                        response_format={'type':'json_object'},temperature=0,max_tokens=1800,timeout=min(15,max(1,deadline-time.monotonic()-1)),
+                        model=analysis_model(),
+                        response_format={'type':'json_object'},**completion_options(6000),timeout=min(45,max(1,deadline-time.monotonic()-1)),
                         messages=[{'role':'system','content':'Inspect ONLY the number of moving leaves in the specified hand-drawn openings. Return JSON {"openings":[{"position_index":0,"piece_index":0,"chevron_count":1,"both_chevrons_visible":false}]}. Position and structural_bay indices are ZERO-BASED. Locate positions top to bottom and structural bays left to right using the PHOTO, not normalized measurement coordinates. Inspect the WHOLE requested bay from its left divider to right divider; do not crop to one leaf. Two opposing long chevrons inside the SAME opening indicate TWO leaves even if they do not touch or form an X. Trace the entire left AND right half of each target, especially the rightmost opening. A short handle mark is not a chevron. Count only complete opening chevrons, not transom lines, dimension arrows or neighboring openings. Use chevron_count=null if unclear. Do not output dimensions, frame layout, systems or records.'},
-                                  {'role':'user','content':[{'type':'text','text':'Independently inspect these target regions on the ORIGINAL photo. Locate targets by position order and structural bay order; numeric measurement proportions are irrelevant. '+json.dumps(targets)}, {'type':'image_url','image_url':{'url':url,'detail':'high'}}]}])
+                                  {'role':'user','content':[{'type':'text','text':'Independently inspect these target regions on the ORIGINAL photo. Locate targets by position order and structural bay order; numeric measurement proportions are irrelevant. '+json.dumps(targets)}, {'type':'image_url','image_url':{'url':url,'detail':'original' if analysis_model().startswith('gpt-6') else 'high'}}]}])
                     if audit_response.choices[0].finish_reason!='stop':raise ValueError('Kanat sayısı kontrol yanıtı tamamlanmadı')
                     leaf_audit=json.loads(audit_response.choices[0].message.content)
                     analysis_attempts.append({'stage':'leaf_count_audit','result':leaf_audit})
