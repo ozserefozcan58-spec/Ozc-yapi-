@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v156-complete-response'
+VERSION = 'ozc-v158-upright-bays'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -14,7 +14,7 @@ INSTRUCTIONS = '''You read Turkish hand-drawn aluminium joinery sheets. Return J
 Read ALL positions in visual order, left to right and top to bottom. Ignore material stock totals as positions.
 Extract THREE separate things for EVERY position: (1) written outside width/height in cm, (2) frame/mullion layout, (3) opening symbols and system labels. Do not stop after measuring rectangles.
 An unmarked rectangular panel is FIXED glazing. The generic word window/pencere never means operable sash. Short diagonal measurement ticks across outer edges or across a fixed mullion are dimension marks, NEVER sash symbols. Only clear chevrons/X INSIDE the glazing, made of long lines meeting within the pane, are opening evidence. A vertical divider alone does not indicate a sash. Return opening_symbol=single_chevron/double_chevron/binili_symbol for every operable opening. Use no opening pieces for panels without interior opening marks. For handwritten corrected heights, use the uncrossed latest value; different heights on different positions are not contradictions.
-Mentally rotate sideways photographs until the handwritten captions and dimensions are upright before classifying openings. A single large triangle/chevron inside a lower side bay IS a real opening symbol even when it touches the outer edge; a fixed rectangle above it must remain a transom. For EVERY opening piece put opening_symbol directly on that piece (single_chevron, double_chevron or binili_symbol), never only in a note or position-level field.
+Mentally rotate sideways photographs until the handwritten captions and dimensions are upright before classifying openings. After rotation, width is the written horizontal outside dimension and height the written vertical outside dimension. Do not confuse the photo page orientation with the upright orientation of each joinery. Never fabricate an evenly spaced position_from_left_cm from outside width or sketch proportions; leave it null unless a divider offset is actually written. A single large triangle/chevron inside a lower side bay IS a real opening symbol even when it touches the outer edge; a fixed rectangle above it must remain a transom. For EVERY opening piece put opening_symbol directly on that piece (single_chevron, double_chevron or binili_symbol), never only in a note or position-level field.
 Count the full-height interior vertical dividers across the TOP of the frame first. N dividers means N+1 structural bays. Do not force equal thirds or merge a blank fixed bay between two doors. Read bays left to right before assigning any openings. For EACH position include layout_audit={bay_count,vertical_record_count,bays:[{type:fixed/door/double/sash/doubleSash,has_transom:boolean}]}. Count door meeting stiles separately from fixed dividers. In layout_audit, bay_count and bays describe STRUCTURAL bays from the top edge ONLY, not individual glass panes, transom panes or moving leaves. One double door is ONE structural bay, not two. Two full-height fixed dividers around a central double door mean THREE bays: fixed / double / fixed. Three full-height dividers with a single door and a separate double door mean FOUR bays: fixed / door / fixed / double. Both chevrons inside one double-door opening belong to ONE double piece. A transom above each door adds ZERO structural bays and is a local hh record. Do not add a central v for the double-door meeting stile. Apply these rules by visible topology, never by matching outside dimensions. An alternating fixed / single door / fixed / double door drawing has FOUR bays and THREE full-height vertical mullions, with TWO SEPARATE short transoms, one above each door. A fixed bay between doors must remain intact. Do not bridge the two transoms through that fixed bay. This applies regardless of outside dimensions.
 A chevron in a bay with NO bottom threshold, reaching the same ground line as the neighboring fixed etek, identifies a FLOOR DOOR rather than a window sash. Set floor_opening=true only when this ground opening is visually clear, false for windows with a fixed sill below. Use kind=door or double for floor openings and retain bounds for the actual full opening up to its transom. Do not invert top/bottom coordinates: y=0 at the top, y=1 at the ground. A transom near the upper quarter cannot have y near 0.66. For a labeled outside-to-record distance, emit position_from_left_cm on the v piece; preserve this written position instead of equal spacing. Exterior dimension arrows are measurements, not opening marks. Missing internal door dimensions stay null so the app uses standard doors.
 First trace the structural grid before looking for openings. Outside arrows, leaders, curved arrows pointing at a record, dimension numerals and notebook grid lines are NEVER opening evidence. A horizontal line spanning the frame is a fixed horizontal mullion even when it crosses a vertical mullion. Keep BOTH records at their intersection. Never replace this grid with leaves based on the number, width or height of its rectangular panels.
@@ -33,6 +33,8 @@ Mandatory visual evidence: set bottom_evidence separately for EVERY position AFT
 Final bottom audit: independently inspect the bottom of EACH FIXED pane, including panes beside a door. If only the fixed side has a double horizontal bottom line and the door side has no fixed threshold, still set position bottom_profile=etek; the drawing engine cuts that etek at the door. Never require the band to run across the entire position. Example: caption tam seri aldoks, left fixed pane with paired bottom lines, right floor-reaching single chevron plus fixed rectangle above: one door, left etek, right transom, not four-side kasa.
 Written record dimensions have priority over sketch proportions. Inspect dimension leaders BELOW each position, especially arrows from a written number to a vertical divider. A number pointing at the first vertical divider from the left outside edge is position_from_left_cm on that v piece, NOT doorWidth. Record dimensions refer to profile centers. Return null position_from_left_cm for unmeasured dividers; never invent measured offsets from proportions. The app will distribute remaining fixed glazing equally with door widths preserved. Inspect EACH opening separately for the second chevron, especially the rightmost bay; never reuse the single-leaf classification of another opening.
 Opening evidence audit is REQUIRED on EVERY opening piece: leaf_count=1 or 2, floor_opening=true or false, fixed_sill_below=true or false, has_transom=true or false. Count the actual long chevrons independently of kind. Two opposing chevrons in ONE structural bay require leaf_count=2 and opening_symbol=double_chevron even if they do not meet as an X. An opening reaching the bottom with no horizontal fixed threshold requires floor_opening=true and fixed_sill_below=false; a sill only in the NEIGHBORING fixed bay does not make it a window. A rectangle above those chevrons requires has_transom=true and an hh above that bay. Do not use the top of the outer frame as the leaf top when a transom line exists. Missing door height stays null, so the app applies 220 cm. Classify each opening afresh from the photo, not from its previous kind.
+Sideways notebook audit: rotate the entire sheet until the printed notebook heading and handwritten notes are upright. A horizontal dimension BELOW the rectangle is width; a vertical dimension beside it is height. For example a wide shallow three-bay window labelled 214.2 below and 47.6 beside it is width=214.2 height=47.6, never the reverse. Do not divide these values by ten. Outside height labels are NEVER divider offsets. A three-bay sketch with one chevron in EACH bay has TWO vertical records and THREE separate sash pieces, one per bay; opposing chevrons separated by a structural divider are NOT a doubleSash. Draw X symbols only as their own opening evidence, do not spread their classification to neighboring bays. A shallow window with a continuous lower frame is not a floor door. Every audited sash bay MUST have its own piece; do not omit openings to satisfy validation.
+Mixed Aldoks caption: 'dar seri aldoks orta kayitlar tam seri' means system=aldoks, system_series=yarim, record_series=tam. 'tam seri' modifies records only here, not frame or sash. Keep record_series at position level and propagate a clearly shared group caption across its group. record_series may be tam, yarim or null.
 Before returning check: all labeled Aldoks positions have their own system; every opening symbol has an opening piece; double leaves are typed double/doubleSash; transoms remain fixed; only written outside dimensions become actual measurements.'''
 
 ALLOWED = {'v','h','hv','hh','door','double','sash','doubleSash'}
@@ -154,6 +156,8 @@ def validate_result(result):
                 is_double=p.get('leaf_count')==2 or p.get('opening_symbol') in {'double_chevron','binili_symbol'} or p['kind'] in {'double','doubleSash'}
                 if p.get('floor_opening') is True and p.get('fixed_sill_below') is False:
                     p['kind']='double' if is_double else 'door'
+                elif p.get('floor_opening') is False and p.get('fixed_sill_below') is True:
+                    p['kind']='doubleSash' if is_double else 'sash'
                 elif is_double:
                     p['kind']='double' if p['kind']=='door' else 'doubleSash' if p['kind']=='sash' else p['kind']
                 if is_double:p['opening_symbol']='double_chevron'
@@ -195,6 +199,8 @@ def validate_result(result):
             # order. Their sketch bounds need not be precise measurement data.
             bay_indices=[j for j,b in enumerate(bays) if b.get('type') in {'door','double','sash','doubleSash'}]
             opening_parts=sorted([q for q in normalized if q['kind'] in {'door','double','sash','doubleSash'}],key=lambda q: ((q.get('bounds') or q.get('opening') or {}).get('left',q.get('x',0))+(q.get('bounds') or q.get('opening') or {}).get('right',q.get('x',0)))/2)
+            if len(opening_parts)!=len(bay_indices):
+                raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' açılım bildirilen bölme sayısı ile çizilen kanat sayısı farklı; fotoğraftan yeniden kontrol edin')
             if len(opening_parts)==len(bay_indices):
                 for opening,j in zip(opening_parts,bay_indices):
                     box=opening.get('bounds') or opening.get('opening')
@@ -226,6 +232,8 @@ def validate_result(result):
                         pos['warnings'].append('Şematik açılım sınırı kendi yapısal bölmesine hizalandı; yazılı ölçüler korundu.')
                     else:
                         raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' açılım sabit kayıt üzerinden komşu bölmeye taşıyor')
+                if opening.get('floor_opening') is False and opening.get('fixed_sill_below') is True:
+                    bays[bay]['type']='doubleSash' if opening['kind']=='doubleSash' else 'sash'
                 expected=bays[bay].get('type')
                 if expected in {'double','doubleSash'} and opening['kind'] in {'door','sash'}:
                     raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' binili bölme tek kanat olarak aktarılmış')
@@ -291,7 +299,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v156','capabilities':['opening_symbols','per_position_system','schematic_bounds','system_minimum_sizes','complete_response_retry']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v157','capabilities':['opening_symbols','per_position_system','schematic_bounds','system_minimum_sizes','complete_response_retry']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
@@ -382,6 +390,7 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                 except Exception:
                     # Supplemental counting must not discard a valid whole drawing.
                     result.setdefault('warnings',[]).append('Ek kanat sayısı kontrolü tamamlanamadı; tek/binili seçimini önizlemede kontrol edin.')
+        result=validate_result(result)
         return {'result':result,'analyzer_version':VERSION,'diagnostics':{'attempts':[a for a in analysis_attempts if a['stage']=='leaf_count_audit']}}
     except Exception as exc:
         detail=analysis_error(exc)
