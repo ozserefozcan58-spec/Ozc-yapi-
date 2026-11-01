@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v154-leaf-bay-index'
+VERSION = 'ozc-v155-system-minimum'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -108,14 +108,18 @@ def validate_result(result):
     if not result['positions']: raise ValueError('Okunabilir poz bulunamadı')
     for i,pos in enumerate(result['positions'],1):
         if not isinstance(pos,dict): raise ValueError('Poz nesnesi geçersiz')
+        local_series=canonical_series(pos.get('system_series') or pos.get('series')) or canonical_series(pos.get('system'))
+        if not local_series and (pos.get('system') in (None,'aldoks')):
+            local_series=canonical_series(result.get('system_series')) or canonical_series(result.get('system'))
+        minimum=5 if local_series=='yarim' else 10
         for key in ('width','height'):
             value = pos.get(key)
             if value is None: continue
             if isinstance(value,bool): raise ValueError('Ölçü değeri geçersiz')
             try: number=float(str(value).strip().replace(',','.'))
             except (ValueError,TypeError): raise ValueError('P'+str(i)+' dış ölçüsü sayısal değil')
-            if not math.isfinite(number) or not 30 <= number <= 3000:
-                raise ValueError('P'+str(i)+' dış ölçüsü aralık dışında')
+            if not math.isfinite(number) or not minimum <= number <= 3000:
+                raise ValueError('P'+str(i)+' dış ölçüsü aralık dışında; seçilen sistemde minimum '+str(minimum)+' cm')
             pos[key]=number
         local_system=str(pos.get('system') or '').lower()
         series=canonical_series(pos.get('system_series') or pos.get('series')) or canonical_series(pos.get('system'))
@@ -225,6 +229,11 @@ def validate_result(result):
                 expected=bays[bay].get('type')
                 if expected in {'double','doubleSash'} and opening['kind'] in {'door','sash'}:
                     raise ValueError('Bölme yerleşimi tutarsız: P'+str(i)+' binili bölme tek kanat olarak aktarılmış')
+        actual_records=sum(p['kind']=='v' for p in normalized)
+        if pos.get('records')!=actual_records:
+            if not isinstance(pos.get('warnings'),list):pos['warnings']=[]
+            pos['warnings'].append('Dikey kayıt adedi doğrulanmış parça listesine göre '+str(actual_records)+' olarak düzeltildi.')
+        pos['records']=actual_records
         pos['pieces'] = normalized[:40]
         if generic_count:
             warnings=pos.get('warnings')
@@ -253,7 +262,7 @@ def analysis_error(exc):
 
 @app.get('/health')
 def health():
-    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v154','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
+    return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v155','capabilities':['opening_symbols','per_position_system','schematic_bounds']}
 
 @app.post('/analyze')
 async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
