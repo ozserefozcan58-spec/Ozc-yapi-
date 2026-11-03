@@ -1,11 +1,11 @@
-import os, base64, json, secrets, math, logging, unicodedata, time, hashlib, copy
+import os, base64, json, secrets, math, logging, unicodedata, time, hashlib, copy, asyncio
 from collections import OrderedDict
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v160-speed'
+VERSION = 'ozc-v162-service-retry'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -26,7 +26,8 @@ Read labels BELOW the drawings and in notebook captions, not just above them. 'A
 Respect labels local to each position: Aldoks written above a WC door applies to that door only. C60/RW60 and Aldoks must never be merged into one system for all positions. Labels may apply to neighboring similar doors. If Aldoks series (tam/yarim) is absent, report system=aldoks and system_series=null, plus a Turkish warning. Do not guess profile series.
 Top-level keys: customer, project, system (c60/aldoks/null), glass, positions, warnings (Turkish strings).
 Do not emit fixed glass, outer frames, sills or glazing beads in pieces; they are implicit. Only mullions and operable openings belong in pieces.
-Each position: bottom_evidence (single_line/paired_lines/unclear), bottom_profile (etek/kasa/null), width, height, system (c60/aldoks/null), system_series (tam/yarim/null), records, pieces, warnings, note.
+Sloped-top outside frames: read the written LEFT and RIGHT vertical heights independently, in centimeters. Return left_height and right_height on EVERY position, plus sloped_top=true/false. For a flat frame set both to the written height. For a sloped frame height=max(left_height,right_height); NEVER average, swap, flatten or estimate an unreadable side from the drawn angle. If a side is unreadable return null and warn in Turkish. Example: width written 320 below, 250 beside the left upright, 400 beside the right upright, top line rising to the right: width=320,height=400,left_height=250,right_height=400,sloped_top=true. Keep internal door transoms separate from the OUTER sloped top; an internal horizontal line does not make the outer frame flat. Apply this independently to each drawing in mixed C60/Aldoks sheets.
+Each position: left_height, right_height, sloped_top, bottom_evidence (single_line/paired_lines/unclear), bottom_profile (etek/kasa/null), width, height, system (c60/aldoks/null), system_series (tam/yarim/null), records, pieces, warnings, note.
 width/height must come from clearly written outside dimensions, never proportions. Use null for unreadable dimensions and warn; retain original visual order.
 records counts fixed vertical mullions only, NOT sash stiles, double-leaf meeting stiles, frames or dimension ticks.
 pieces contains all visible fixed mullions AND all openings. Allowed kind: v,h,hv,hh,door,double,sash,doubleSash. single_chevron/double_chevron/binili_symbol are opening_symbol values, NEVER kind values. Normalized x/y are visual layout coordinates (0..1) only. Opening pieces require bounds={left,right,top,bottom} describing the visible opening within the outer frame (0..1), align=left/center/right, side=left/right, mainSide=right unless explicitly indicated. doorWidth/doorHeight must be explicit written internal opening dimensions, otherwise null. Flag schematic=true when bounds are estimated from sketch proportions. These proportions are for schematic display only, never manufacturing measurements. For doors with missing written internal measurements return doorWidth=null and/or doorHeight=null. The application applies the user-approved defaults (single 90 x 220 cm, double 180 x 220 cm) only for those missing axes; never fill a missing door measurement from proportions. A marked opening reaching the floor is a door; a fixed rectangle above it remains a transom. Keep its left/right location. For sash/doubleSash without written dimensions retain null and schematic bounds; do not apply door defaults to windows. v/h pieces use x/y. h means FULL frame width: use it only for a line visibly crossing all bays. A line only above a side door MUST be hh with doorSpan=[left,right] limited to that side bay, never h. Set scope=full only for a confirmed full-width horizontal. hh also includes doorSpan=[left,right]. Do not duplicate an opening edge if the shared fixed mullion is already represented. If an opening symbol exists, pieces MUST NOT be empty. If type is uncertain, preserve your best structural classification and explain in Turkish warnings, rather than silently returning fixed glazing.
@@ -115,6 +116,23 @@ def validate_result(result):
         if not local_series and (pos.get('system') in (None,'aldoks')):
             local_series=canonical_series(result.get('system_series')) or canonical_series(result.get('system'))
         minimum=5 if local_series=='yarim' else 10
+        for side in ('left_height','right_height'):
+            value=pos.get(side, pos.get('leftHeight' if side=='left_height' else 'rightHeight'))
+            if value is None:
+                pos[side]=None
+                continue
+            if isinstance(value,bool):raise ValueError('P'+str(i)+' yan yüksekliği geçersiz')
+            try:number=float(str(value).strip().replace(',','.'))
+            except (ValueError,TypeError):raise ValueError('P'+str(i)+' yan yüksekliği sayısal değil')
+            if not math.isfinite(number) or not minimum <= number <= 3000:
+                raise ValueError('P'+str(i)+' yan yüksekliği aralık dışında')
+            pos[side]=number
+        sides=[pos.get('left_height'),pos.get('right_height')]
+        if all(v is not None for v in sides):
+            pos['height']=max(sides)
+            pos['sloped_top']=abs(sides[0]-sides[1])>.01
+        elif pos.get('sloped_top') is True:
+            raise ValueError('P'+str(i)+' zaviyeli doğramanın sol ve sağ yükseklikleri eksik; iki yan ölçüsünü okunaklı yükleyin')
         for key in ('width','height'):
             value = pos.get(key)
             if value is None: continue
@@ -270,10 +288,23 @@ async def complete_analysis_json(client, messages, attempts, stage, deadline, re
         request_messages.append({'role':'user','content':
             'Return compact JSON without indentation. Preserve EVERY position and every required field. '
             'Do not repeat the instructions or add prose. Keep Turkish notes brief; do not omit openings or evidence.'})
-        response = await client.chat.completions.create(
-            model=analysis_model(),
-            response_format={'type':'json_object'}, **completion_options(token_limit),
-            timeout=min(100 if not review else 70, remaining-1), messages=request_messages)
+        for service_attempt in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining < 3:
+                raise ValueError('Analiz süresi doldu; fotoğrafı yeniden deneyin')
+            try:
+                response = await client.chat.completions.create(
+                    model=analysis_model(),
+                    response_format={'type':'json_object'}, **completion_options(token_limit),
+                    timeout=min(100 if not review else 70, remaining-1), messages=request_messages)
+                break
+            except Exception as exc:
+                status=getattr(exc,'status_code',None)
+                if status not in (500,502,503,504) or service_attempt or deadline-time.monotonic()<8:
+                    raise
+                attempts.append({'stage':stage+'_service_retry','upstream_status':status})
+                logger.warning('OZC transient upstream failure status=%s; retrying once',status)
+                await asyncio.sleep(1)
         if time.monotonic() >= deadline:
             raise ValueError('Analiz süresi doldu; fotoğrafı daha az pozla yeniden deneyin')
         if not response.choices:
@@ -302,6 +333,7 @@ def analysis_error(exc):
     if status==429:
         return 'OPENAI_QUOTA: API bakiyesi/kotası yetersiz.' if code=='insufficient_quota' else 'OPENAI_RATE: API kullanım sınırına ulaşıldı. Biraz sonra deneyin.'
     if status==404:return 'OPENAI_MODEL: Render OPENAI_MODEL değeri için model bulunamadı veya erişim yok.'
+    if status in (500,502,503,504):return 'OPENAI_SERVICE: Yapay zekâ servisi geçici hata verdi (HTTP '+str(status)+'). Otomatik tekrar da tamamlanamadı; biraz sonra yeniden deneyin.'
     if status==400:return 'OPENAI_REQUEST: Model veya görsel isteği reddedildi; OPENAI_MODEL ayarını kontrol edin.'
     if name=='APITimeoutError':return 'OPENAI_TIMEOUT: Görsel analizi zaman aşımına uğradı.'
     if name=='APIConnectionError':return 'OPENAI_CONNECTION: Sunucu OpenAI bağlantısını kuramadı.'
