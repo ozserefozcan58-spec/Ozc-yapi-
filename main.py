@@ -1,10 +1,11 @@
-import os, base64, json, secrets, math, logging, unicodedata, time
+import os, base64, json, secrets, math, logging, unicodedata, time, hashlib, copy
+from collections import OrderedDict
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
-VERSION = 'ozc-v159-astra'
+VERSION = 'ozc-v160-speed'
 logger = logging.getLogger('uvicorn.error')
 app = FastAPI(title='OZC Drawing Analyzer', version=VERSION)
 origins = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
@@ -306,6 +307,30 @@ def analysis_error(exc):
     if name=='APIConnectionError':return 'OPENAI_CONNECTION: Sunucu OpenAI bağlantısını kuramadı.'
     return 'AI_INTERNAL: Analiz tamamlanamadı. Render Logs içindeki OZC analysis failure satırını paylaşın.'
 
+# Exact-image results only; bounded process memory, no image bytes retained.
+_ANALYSIS_CACHE = OrderedDict()
+_CACHE_TTL = 300
+_CACHE_LIMIT = 8
+
+def cached_analysis(cache_key):
+    now = time.monotonic()
+    for k in list(_ANALYSIS_CACHE):
+        if now - _ANALYSIS_CACHE[k][0] >= _CACHE_TTL:
+            del _ANALYSIS_CACHE[k]
+    entry = _ANALYSIS_CACHE.get(cache_key)
+    if entry is None:
+        return None
+    _ANALYSIS_CACHE.move_to_end(cache_key)
+    value = copy.deepcopy(entry[1])
+    value.setdefault('diagnostics', {})['cache_hit'] = True
+    return value
+
+def save_analysis(cache_key, value):
+    _ANALYSIS_CACHE[cache_key] = (time.monotonic(), copy.deepcopy(value))
+    _ANALYSIS_CACHE.move_to_end(cache_key)
+    while len(_ANALYSIS_CACHE) > _CACHE_LIMIT:
+        _ANALYSIS_CACHE.popitem(last=False)
+
 @app.get('/health')
 def health():
     return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v159','model':analysis_model(),'capabilities':['opening_symbols','per_position_system','schematic_bounds','system_minimum_sizes','complete_response_retry']}
@@ -322,6 +347,10 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
         raise HTTPException(415, 'JPEG, PNG or WEBP required')
     content = await image.read(10*1024*1024+1)
     if len(content)>10*1024*1024: raise HTTPException(413, 'Maximum image size 10MB')
+    cache_key = hashlib.sha256(content + (image.content_type + analysis_model() + VERSION + INSTRUCTIONS + access_key + key).encode()).hexdigest()
+    cached = cached_analysis(cache_key)
+    if cached is not None:
+        return cached
     url = 'data:'+image.content_type+';base64,'+base64.b64encode(content).decode()
     analysis_attempts=[]
     stage='initial_analysis'
@@ -400,7 +429,11 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
                     # Supplemental counting must not discard a valid whole drawing.
                     result.setdefault('warnings',[]).append('Ek kanat sayısı kontrolü tamamlanamadı; tek/binili seçimini önizlemede kontrol edin.')
         result=validate_result(result)
-        return {'result':result,'analyzer_version':VERSION,'diagnostics':{'attempts':[a for a in analysis_attempts if a['stage']=='leaf_count_audit']}}
+        response_payload = {'result':result,'analyzer_version':VERSION,'diagnostics':{'cache_hit':False,'attempts':[a for a in analysis_attempts if a['stage']=='leaf_count_audit']}}
+        # Do not reuse a result whose supplemental visual check failed.
+        if not any('Ek kanat sayısı kontrolü tamamlanamadı' in str(w) for w in result.get('warnings', [])):
+            save_analysis(cache_key, response_payload)
+        return response_payload
     except Exception as exc:
         detail=analysis_error(exc)
         if isinstance(exc,(ValueError,json.JSONDecodeError)):
