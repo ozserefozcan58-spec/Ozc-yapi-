@@ -471,9 +471,11 @@ async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = 
         if isinstance(exc,(ValueError,json.JSONDecodeError)):
             return JSONResponse(status_code=502,content={'detail':detail,'analyzer_version':VERSION,'diagnostics':{'stage':stage,'review_reason':review_reason,'attempts':analysis_attempts}})
         raise HTTPException(502, detail)
-
+from pathlib import Path
 from fastapi.responses import FileResponse
 
 @app.get("/")
 async def ana_sayfa():
-    return FileResponse("index.html")
+    return FileResponse(
+    Path(__file__).resolve().parent / "index.html"
+)
