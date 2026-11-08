@@ -487,10 +487,56 @@ async def analyze(request: Request, image: UploadFile = File(...), x_ozc_access_
             return JSONResponse(status_code=502,content={'detail':detail,'analyzer_version':VERSION,'diagnostics':{'stage':stage,'review_reason':review_reason,'attempts':analysis_attempts}})
         raise HTTPException(502, detail)
 from pathlib import Path
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse, Response
+import struct, zlib
+
+@app.get("/manifest.webmanifest")
+def pwa_manifest():
+    return JSONResponse({
+        "name": "ÖZC Yapı",
+        "short_name": "ÖZC Yapı",
+        "id": "/",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#f3f6f8",
+        "theme_color": "#123b50",
+        "icons": [
+            {"src": "/pwa-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/pwa-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+        ]
+    }, headers={"Cache-Control": "public, max-age=3600"})
+
+def _pwa_png(size):
+    # Self-contained PNG icon, without additional dependencies.
+    raw = bytearray()
+    for y in range(size):
+        raw.append(0)
+        for x in range(size):
+            background = (18, 59, 80)
+            # White stylized window frame and cross.
+            frame = (size * 18 // 100 <= x < size * 82 // 100 and size * 18 // 100 <= y < size * 82 // 100)
+            inner = (size * 24 // 100 <= x < size * 76 // 100 and size * 24 // 100 <= y < size * 76 // 100)
+            cross = (abs(x-size//2) < size//40 or abs(y-size//2) < size//40)
+            rgb = (255,255,255) if frame and (not inner or cross) else background
+            raw.extend((*rgb, 255))
+    def chunk(tag, data):
+        return struct.pack(">I",len(data))+tag+data+struct.pack(">I",zlib.crc32(tag+data)&0xffffffff)
+    return b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",size,size,8,6,0,0,0))+chunk(b"IDAT",zlib.compress(bytes(raw),9))+chunk(b"IEND",b"")
+
+@app.get("/pwa-icon-{size}.png")
+def pwa_icon(size: int):
+    if size not in (192,512):
+        raise HTTPException(404, "Icon not found")
+    return Response(_pwa_png(size), media_type="image/png", headers={"Cache-Control":"public, max-age=86400"})
 
 @app.get("/")
 async def ana_sayfa():
-    return FileResponse(
-    Path(__file__).resolve().parent / "index.html"
-)
+    html = (Path(__file__).resolve().parent / "index.html").read_text(encoding="utf-8")
+    pwa_head = ('<link rel="manifest" href="/manifest.webmanifest">'
+                '<meta name="theme-color" content="#123b50">'
+                '<link rel="icon" type="image/png" href="/pwa-icon-192.png">')
+    if 'rel="manifest"' not in html:
+        html = html.replace("</head>", pwa_head + "</head>", 1)
+    return HTMLResponse(html, headers={"Cache-Control":"no-cache, must-revalidate"})
+
