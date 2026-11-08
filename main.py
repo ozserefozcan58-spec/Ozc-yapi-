@@ -530,6 +530,18 @@ def pwa_icon(size: int):
         raise HTTPException(404, "Icon not found")
     return Response(_pwa_png(size), media_type="image/png", headers={"Cache-Control":"public, max-age=86400"})
 
+@app.get("/sw.js")
+def pwa_service_worker():
+    # Network-first: never cache user project data or photo-analysis requests.
+    script = """self.addEventListener('install', event => { self.skipWaiting(); });
+self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });
+self.addEventListener('fetch', event => {
+  if (event.request.method !== 'GET') return;
+  if (event.request.mode !== 'navigate') return;
+  event.respondWith(fetch(event.request).catch(() => new Response('İnternet bağlantısı gerekli', {status: 503, headers: {'Content-Type':'text/plain; charset=utf-8'}})));
+});"""
+    return Response(script, media_type="application/javascript", headers={"Cache-Control":"no-cache", "Service-Worker-Allowed":"/"})
+
 @app.get("/")
 async def ana_sayfa():
     html = (Path(__file__).resolve().parent / "index.html").read_text(encoding="utf-8")
@@ -538,5 +550,11 @@ async def ana_sayfa():
                 '<link rel="icon" type="image/png" href="/pwa-icon-192.png">')
     if 'rel="manifest"' not in html:
         html = html.replace("</head>", pwa_head + "</head>", 1)
+    register_sw = ('<script>if ("serviceWorker" in navigator) {'
+                   'window.addEventListener("load", function() {'
+                   'navigator.serviceWorker.register("/sw.js", {scope:"/"}).catch(console.warn);'
+                   '});}</script>')
+    if '/sw.js' not in html:
+        html = html.replace("</body>", register_sw + "</body>", 1)
     return HTMLResponse(html, headers={"Cache-Control":"no-cache, must-revalidate"})
 
