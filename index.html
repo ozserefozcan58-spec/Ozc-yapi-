@@ -1856,7 +1856,7 @@ positions=[capturePos()];posLabel();
  function printA4(content){
   const style='<style>@page{size:A4 portrait;margin:12mm}*{box-sizing:border-box}body{margin:0;background:white;color:#1e3443;font:11pt Arial,sans-serif}.v81-print-sheet{width:100%;padding:0}.v81-print-header{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #17475d;padding-bottom:13mm;margin-bottom:9mm}.v81-print-header strong{font-size:20pt;color:#17475d}.v81-print-header span{font-size:14pt;font-weight:bold;letter-spacing:2px}.v81-print-meta{display:flex;justify-content:space-between;margin-bottom:10mm}.v81-offer-table{width:100%;border-collapse:collapse;margin:9mm 0}.v81-offer-table th,.v81-offer-table td{padding:3mm 2mm;border-bottom:1px solid #ddd;text-align:left;font-size:10pt}.v81-offer-table th{background:#edf3f6}.v81-print-total{text-align:right;line-height:2;margin-top:8mm}.v81-print-foot{margin-top:16mm;border-top:1px solid #ddd;padding-top:6mm}tr{break-inside:avoid}button{display:none}@media screen{body{max-width:210mm;margin:20px auto;padding:12mm;box-shadow:0 2px 20px #aaa}}</style>';
   const w=window.open('','_blank');if(!w){alert('PDF sayfası için açılır pencereye izin verin.');return}
-  w.document.open();w.document.write('<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ÖZC Teklif - A4</title>'+style+'</head><body>'+content+'<button onclick="window.print()" style="display:block;margin:20px auto;padding:12px">Yazdır / PDF</button><button class="noPrint" data-pdf-download="true" onclick="window.opener.ozcDownloadVisiblePdf(this,document.body)">PDF indir</button></body></html>');w.document.close();w.focus();setTimeout(()=>w.print(),500);
+  w.document.open();w.document.write('<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ÖZC Teklif - A4</title>'+style+'</head><body>'+content+'<button onclick="window.print()" style="display:block;margin:20px auto;padding:12px">Yazdır / PDF</button><button class="noPrint" data-pdf-download="true" onclick="window.opener.ozcDownloadVisiblePdf(this,document.body)">PDF indir</button><\/body><\/html>');w.document.close();w.focus();setTimeout(()=>w.print(),500);
  }
  function showCustomers(){
   const items=customers();
@@ -1951,7 +1951,7 @@ positions=[capturePos()];posLabel();
      Array.from(form.children).forEach(el=>el.hidden=true);
      form.prepend(aiPanel);
      const aiEndpoint=aiPanel.querySelector('#ozcAiEndpoint');
-     aiEndpoint.value=localStorage.getItem('ozc_v89_ai_endpoint')||'https://ozc-yapi.onrender.com/analyze';
+     aiEndpoint.value='https://ozc-yapi.onrender.com/analyze';
      const aiKeyInput=aiPanel.querySelector('#ozcAiAccessKey'),aiRemember=aiPanel.querySelector('#ozcAiRememberKey');
      const aiDevice=aiPanel.querySelector('#ozcAiRememberDevice'),keyMessage=aiPanel.querySelector('#ozcAiKeyMessage');
      function keySlot(){try{return 'ozc_access_session:'+new URL(aiEndpoint.value.trim()).origin}catch(_){return null}}
@@ -2169,11 +2169,11 @@ positions=[capturePos()];posLabel();
      };
      aiPanel.querySelector('#ozcAiAnalyze').onclick=async()=>{
        const status=aiPanel.querySelector('#ozcAiStatus');const btn=aiPanel.querySelector('#ozcAiAnalyze');
-       aiEndpoint.value=localStorage.getItem('ozc_v89_ai_endpoint')||aiEndpoint.value;restoreAccess();
+       aiEndpoint.value='https://ozc-yapi.onrender.com/analyze';restoreAccess();
        let endpoint;try{endpoint=aiAddress();aiEndpoint.value=endpoint}catch(err){status.textContent=err.message;return}
        const accessKey=aiPanel.querySelector('#ozcAiAccessKey').value.trim();
        rememberAccess();
-       if(!accessKey){status.textContent='Analiz bağlantısı ayarlanmamış. Ana Menü → Ayarlar bölümünden URL ve erişim şifresini kaydedin.';return}
+       // Sunucu, anonim istekleri kotalı olarak doğrular; istemcide şifre zorunlu değildir.
        if(!/^https:\/\/[^\s]+/i.test(endpoint)){status.textContent='Önce güvenli (https://) analiz sunucusunun adresini gir. Henüz bağlantı kurulmadıysa analiz yapılamaz.';return}
        localStorage.setItem('ozc_v89_ai_endpoint',endpoint);
        lastAnalysisReport=null;aiPanel.querySelector('#ozcAiReport').hidden=true;
@@ -2216,7 +2216,7 @@ positions=[capturePos()];posLabel();
          const timer=setTimeout(()=>controller.abort(),240000);
          let response,json;
          try{
-          response=await fetch(endpoint,{method:'POST',headers:{'X-OZC-Access-Key':accessKey},body:payload,signal:controller.signal});
+          response=await fetch(endpoint,{method:'POST',headers:accessKey?{'X-OZC-Access-Key':accessKey}:{},body:payload,signal:controller.signal});
           // Keep the deadline active until the entire response body has arrived.
           const body=await response.text();
           try{json=JSON.parse(body)}catch(_){throw Error('Sunucu geçerli analiz yanıtı döndürmedi (HTTP '+response.status+'). Tekrar deneyin.');}
@@ -2644,7 +2644,7 @@ function printOffer(e){
  const styles=[...document.querySelectorAll('style')].map(x=>x.textContent).join('\n');
  const w=window.open('','_blank');
  if(!w){window.print();return}
- w.document.open();w.document.write('<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ÖZC Yapı İmalat - Yazdır / PDF</title><style>'+styles+'\nbody{background:white!important;padding:12px!important}.ozc-proposal{max-width:186mm;margin:auto}.noPrint,.editorHead,#ozcNavigation{display:none!important}@media print{@page{size:A4 portrait;margin:12mm}body{padding:0!important}}</style></head><body><div id="analysis">'+content+'</div><div class="noPrint" style="text-align:center;margin:20px"><button onclick="window.print()" style="font-size:17px;padding:12px 25px">Yazdır / PDF</button><button class="noPrint" data-pdf-download="true" onclick="window.opener.ozcDownloadVisiblePdf(this,document.getElementById(&quot;analysis&quot;))">PDF indir</button></div></body></html>');w.document.close();
+ w.document.open();w.document.write('<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ÖZC Yapı İmalat - Yazdır / PDF</title><style>'+styles+'\nbody{background:white!important;padding:12px!important}.ozc-proposal{max-width:186mm;margin:auto}.noPrint,.editorHead,#ozcNavigation{display:none!important}@media print{@page{size:A4 portrait;margin:12mm}body{padding:0!important}}</style></head><body><div id="analysis">'+content+'</div><div class="noPrint" style="text-align:center;margin:20px"><button onclick="window.print()" style="font-size:17px;padding:12px 25px">Yazdır / PDF</button><button class="noPrint" data-pdf-download="true" onclick="window.opener.ozcDownloadVisiblePdf(this,document.getElementById(&quot;analysis&quot;))">PDF indir</button></div><\/body><\/html>');w.document.close();
  try{w.focus();setTimeout(()=>w.print(),450)}catch(err){console.warn(err)}
 }
 document.addEventListener('click',printOffer,true);
@@ -2943,7 +2943,7 @@ button.onclick=()=>{if(document.getElementById('bottomProfileList')){close();ret
 <script id="ozc-v215-safe-script">(()=>{function fix(){const s=document.getElementById('slopeSettings'),d=document.querySelector('.drawing-settings');if(s&&d&&d.parentElement)s.parentElement===d.parentElement&&d.insertAdjacentElement('afterend',s)}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',fix);else fix()})();</script><style id="ozc-v249-page-scroll">
 .canvas,#canvas{overflow:clip!important;overscroll-behavior:auto!important;touch-action:pan-y pinch-zoom!important}
 .canvas svg,#drawing{touch-action:pan-y pinch-zoom!important;overscroll-behavior:auto!important}
-</style></body></html>
+</style>
 <style id="ozc-v269-profile-preview">
 #ozcCutProfileGallery .ozc-profile-card img{cursor:pointer!important}
 #ozcProfileLightbox{position:fixed;inset:0;z-index:2147483646;background:rgba(7,19,31,.78);display:none;align-items:center;justify-content:center;padding:20px;box-sizing:border-box;overflow:auto}
@@ -2975,3 +2975,5 @@ document.addEventListener('click',function(e){var img=e.target.closest('#ozcCutP
 var original=card.querySelector('.ozc-profile-mm');box._originalInput=original;box.querySelector('.ozc-preview-mm').value=original?original.value:'';box.querySelector('.ozc-preview-edit').style.display=original?'flex':'none';box.classList.add('ozc-visible');e.preventDefault();e.stopImmediatePropagation();},true);
 })();
 </script>
+</body>
+</html>
