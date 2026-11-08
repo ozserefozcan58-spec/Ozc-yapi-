@@ -1,6 +1,6 @@
 import os, base64, json, secrets, math, logging, unicodedata, time, hashlib, copy, asyncio
 from collections import OrderedDict
-from fastapi import FastAPI, UploadFile, File, HTTPException, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
@@ -367,19 +367,34 @@ def save_analysis(cache_key, value):
 def health():
     return {'status':'ok','analyzer_version':VERSION,'diagnostics_version':'v159','model':analysis_model(),'capabilities':['opening_symbols','per_position_system','schematic_bounds','system_minimum_sizes','complete_response_retry']}
 
+_PUBLIC_USAGE = {}
+
 @app.post('/analyze')
-async def analyze(image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
+async def analyze(request: Request, image: UploadFile = File(...), x_ozc_access_key: str | None = Header(default=None)):
     access_key = os.getenv('OZC_ACCESS_KEY')
-    if not access_key: raise HTTPException(503, 'Access control not configured')
-    if not x_ozc_access_key or not secrets.compare_digest(x_ozc_access_key, access_key):
-        raise HTTPException(401, 'Unauthorized')
+    authorized = bool(access_key and x_ozc_access_key and secrets.compare_digest(x_ozc_access_key, access_key))
+    if not authorized:
+        # Public, no-password use: only requests from the published web app.
+        # Origin is a browser safeguard, not proof of identity.
+        if request.headers.get('origin', '').rstrip('/') != 'https://ozc-yapi.onrender.com':
+            raise HTTPException(403, 'Please use the OZC web app')
+        day = int(time.time() // 86400)
+        ip = request.headers.get('x-forwarded-for', '').split(',')[0].strip() or (request.client.host if request.client else 'unknown')
+        for k in list(_PUBLIC_USAGE):
+            if k[0] != day: _PUBLIC_USAGE.pop(k, None)
+        global_key = (day, '*')
+        ip_key = (day, ip)
+        if _PUBLIC_USAGE.get(ip_key, 0) >= 10 or _PUBLIC_USAGE.get(global_key, 0) >= 100:
+            raise HTTPException(429, 'Günlük ücretsiz analiz sınırına ulaşıldı')
+        _PUBLIC_USAGE[ip_key] = _PUBLIC_USAGE.get(ip_key, 0) + 1
+        _PUBLIC_USAGE[global_key] = _PUBLIC_USAGE.get(global_key, 0) + 1
     key = os.getenv('OPENAI_API_KEY')
     if not key: raise HTTPException(503, 'OPENAI_API_KEY not configured')
     if image.content_type not in ('image/jpeg','image/png','image/webp'):
         raise HTTPException(415, 'JPEG, PNG or WEBP required')
     content = await image.read(10*1024*1024+1)
     if len(content)>10*1024*1024: raise HTTPException(413, 'Maximum image size 10MB')
-    cache_key = hashlib.sha256(content + (image.content_type + analysis_model() + VERSION + INSTRUCTIONS + access_key + key).encode()).hexdigest()
+    cache_key = hashlib.sha256(content + (image.content_type + analysis_model() + VERSION + INSTRUCTIONS + (access_key or '') + key).encode()).hexdigest()
     cached = cached_analysis(cache_key)
     if cached is not None:
         return cached
